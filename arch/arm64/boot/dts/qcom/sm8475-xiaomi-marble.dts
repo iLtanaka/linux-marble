@@ -10,6 +10,7 @@
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+#include <dt-bindings/media/video-interfaces.h>
 
 #include "sm8475.dtsi"
 #include "pm8350.dtsi"
@@ -226,6 +227,33 @@
 			reg = <0x0 0xb8000000 0x0 0x2b00000>;
 			no-map;
 		};
+	};
+
+	/* Main camera (OV64B40) supplies, Android "CAMERA_W_DVDD" / "CAMERA_W_AVDD" */
+	cam_w_dvdd: regulator-cam-w-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam_w_dvdd";
+		regulator-min-microvolt = <1100000>;
+		regulator-max-microvolt = <1100000>;
+		gpio = <&tlmm 2 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <100>;
+		vin-supply = <&pm8350_s12>;
+		pinctrl-0 = <&cam_w_dvdd_en>;
+		pinctrl-names = "default";
+	};
+
+	cam_w_avdd: regulator-cam-w-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam_w_avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 64 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <100>;
+		vin-supply = <&pm8350c_bob>;
+		pinctrl-0 = <&cam_w_avdd_en>;
+		pinctrl-names = "default";
 	};
 
 	vph_pwr: vph-pwr-regulator {
@@ -1189,6 +1217,9 @@
 	model = "SM8475-Xiaomi-Marble";
 	speaker-earpiece-gpios = <&tlmm 52 GPIO_ACTIVE_HIGH>;
 
+	/* Top amp routing: high = earpiece (exposed as "Speaker Earpiece Switch") */
+	speaker-earpiece-gpios = <&tlmm 52 GPIO_ACTIVE_HIGH>;
+
 	pinctrl-0 = <&tert_mi2s_active>;
 	pinctrl-names = "default";
 
@@ -1328,6 +1359,48 @@
 		output-high;
 	};
 
+	cam_mclk2_default: cam-mclk2-default-state {
+		pins = "gpio102";
+		function = "cam_mclk";
+		drive-strength = <4>;
+		bias-disable;
+	};
+
+	cam_mclk2_suspend: cam-mclk2-suspend-state {
+		pins = "gpio102";
+		function = "cam_mclk";
+		drive-strength = <4>;
+		bias-pull-down;
+	};
+
+	cam_reset0_default: cam-reset0-default-state {
+		pins = "gpio126";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_reset0_suspend: cam-reset0-suspend-state {
+		pins = "gpio126";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	cam_w_dvdd_en: cam-w-dvdd-en-state {
+		pins = "gpio2";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_w_avdd_en: cam-w-avdd-en-state {
+		pins = "gpio64";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
 	cam_reset2_suspend: cam-reset2-suspend-state {
 		pins = "gpio24";
 		function = "gpio";
@@ -1361,10 +1434,55 @@
 		dvdd-supply = <&pm8008j_l2>;
 		dovdd-supply = <&pm8450_l4>;
 
+		/* Android qcom,cam-sensor2: yaw 180 (rear), roll 90 */
+		orientation = <1>;
+		rotation = <90>;
+
 		port {
 			imx355_ep: endpoint {
 				data-lanes = <1 2 3 4>;
 				link-frequencies = /bits/ 64 <360000000>;
+				remote-endpoint = <&csiphy0_ep>;
+			};
+		};
+	};
+};
+
+&cci0_i2c1 {
+	/*
+	 * Main camera: OmniVision OV64B40 (Android marble_ofilm_ov64b40_wide_i,
+	 * chip id 0x566442, 8-bit addr 0x20), MCLK2 19.2 MHz, C-PHY (3 trios)
+	 * on CSIPHY2.
+	 */
+	ov64b40: camera@10 {
+		compatible = "ovti,ov64b40";
+		reg = <0x10>;
+
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+
+		clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		assigned-clock-rates = <19200000>;
+
+		reset-gpios = <&tlmm 126 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default", "suspend";
+		pinctrl-0 = <&cam_mclk2_default &cam_reset0_default>;
+		pinctrl-1 = <&cam_mclk2_suspend &cam_reset0_suspend>;
+
+		avdd-supply = <&cam_w_avdd>;
+		dvdd-supply = <&cam_w_dvdd>;
+		dovdd-supply = <&pm8450_l4>;
+
+		/* Android roll is 90 too, but the stock mode mirrors (0x3821): 270 is upright */
+		orientation = <1>;
+		rotation = <270>;
+
+		port {
+			ov64b40_ep: endpoint {
+				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
+				data-lanes = <1 2 3>;
+				link-frequencies = /bits/ 64 <1280000000>;
+				remote-endpoint = <&csiphy2_ep>;
 			};
 		};
 	};
@@ -1372,4 +1490,226 @@
 
 &cci1 {
 	status = "okay";
+};
+
+&soc {
+	camtest: camtest {
+		compatible = "marble,camtest";
+		status = "disabled";
+		power-domains = <&camcc TITAN_TOP_GDSC>, <&camcc IPE_0_GDSC>,
+				<&rpmhpd RPMHPD_MXC>, <&rpmhpd RPMHPD_MMCX>, <&rpmhpd RPMHPD_MX>,
+				<&camcc BPS_GDSC>;
+		power-domain-names = "top", "ipe", "mxc", "mmcx", "mx", "bps";
+		memory-region = <&camera_mem>;
+		interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
+				 &config_noc SLAVE_CAMERA_CFG QCOM_ICC_TAG_ACTIVE_ONLY>,
+				<&mmss_noc MASTER_CAMNOC_HF QCOM_ICC_TAG_ALWAYS
+				 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>,
+				<&mmss_noc MASTER_CAMNOC_SF QCOM_ICC_TAG_ALWAYS
+				 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>,
+				<&mmss_noc MASTER_CAMNOC_ICP QCOM_ICC_TAG_ALWAYS
+				 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>;
+		interconnect-names = "ahb", "hf_0", "sf_0", "icp";
+		/* order matters: bus + ICP clocks first, last 6 are IPE clocks */
+		clocks = <&gcc GCC_CAMERA_HF_AXI_CLK>,
+			 <&gcc GCC_CAMERA_SF_AXI_CLK>,
+			 <&camcc CAM_CC_CPAS_AHB_CLK>,
+			 <&camcc CAM_CC_CORE_AHB_CLK>,
+			 <&camcc CAM_CC_CPAS_FAST_AHB_CLK>,
+			 <&camcc CAM_CC_CAMNOC_AXI_CLK>,
+			 <&camcc CAM_CC_ICP_AHB_CLK>,
+			 <&camcc CAM_CC_ICP_CLK>,
+			 <&camcc CAM_CC_QDSS_DEBUG_XO_CLK>,
+			 <&camcc CAM_CC_BPS_AHB_CLK>,
+			 <&camcc CAM_CC_BPS_FAST_AHB_CLK>,
+			 <&camcc CAM_CC_BPS_CLK>,
+			 <&camcc CAM_CC_CPAS_BPS_CLK>,
+			 <&camcc CAM_CC_IPE_NPS_AHB_CLK>,
+			 <&camcc CAM_CC_IPE_NPS_FAST_AHB_CLK>,
+			 <&camcc CAM_CC_IPE_PPS_FAST_AHB_CLK>,
+			 <&camcc CAM_CC_IPE_NPS_CLK>,
+			 <&camcc CAM_CC_IPE_PPS_CLK>,
+			 <&camcc CAM_CC_CPAS_IPE_NPS_CLK>;
+		clock-names = "gcc_hf", "gcc_sf", "cpas_ahb", "core_ahb", "cpas_fast_ahb", "camnoc",
+			      "icp_ahb", "icp", "qdss_xo",
+			      "bps_ahb", "bps_fast_ahb", "bps", "cpas_bps",
+			      "ipe_nps_ahb", "ipe_nps_fast_ahb", "ipe_pps_fast_ahb",
+			      "ipe_nps", "ipe_pps", "cpas_ipe_nps";
+	};
+};
+
+&soc {
+	camss: isp@acb7000 {
+		compatible = "qcom,sm8475-camss";
+
+		reg = <0x0 0x0acb7000 0x0 0x0d00>,
+		      <0x0 0x0acb9000 0x0 0x0d00>,
+		      <0x0 0x0acbb000 0x0 0x0d00>,
+		      <0x0 0x0acc6000 0x0 0x0a00>,
+		      <0x0 0x0acca000 0x0 0x0a00>,
+		      <0x0 0x0acb6000 0x0 0x1000>,
+		      <0x0 0x0ace4000 0x0 0x2000>,
+		      <0x0 0x0ace6000 0x0 0x2000>,
+		      <0x0 0x0ace8000 0x0 0x2000>,
+		      <0x0 0x0acea000 0x0 0x2000>,
+		      <0x0 0x0ac62000 0x0 0xf000>,
+		      <0x0 0x0ac71000 0x0 0xf000>,
+		      <0x0 0x0ac80000 0x0 0xf000>,
+		      <0x0 0x0acc7000 0x0 0x1800>,
+		      <0x0 0x0accb000 0x0 0x1800>;
+		reg-names = "csid0",
+			    "csid1",
+			    "csid2",
+			    "csid_lite0",
+			    "csid_lite1",
+			    "csid_wrapper",
+			    "csiphy0",
+			    "csiphy1",
+			    "csiphy2",
+			    "csiphy3",
+			    "vfe0",
+			    "vfe1",
+			    "vfe2",
+			    "vfe_lite0",
+			    "vfe_lite1";
+
+		clocks = <&camcc CAM_CC_CSIPHY0_CLK>,
+			 <&camcc CAM_CC_CSI0PHYTIMER_CLK>,
+			 <&camcc CAM_CC_CSIPHY1_CLK>,
+			 <&camcc CAM_CC_CSI1PHYTIMER_CLK>,
+			 <&camcc CAM_CC_CSIPHY2_CLK>,
+			 <&camcc CAM_CC_CSI2PHYTIMER_CLK>,
+			 <&camcc CAM_CC_CSIPHY3_CLK>,
+			 <&camcc CAM_CC_CSI3PHYTIMER_CLK>,
+			 <&gcc GCC_CAMERA_HF_AXI_CLK>,
+			 <&gcc GCC_CAMERA_SF_AXI_CLK>,
+			 <&camcc CAM_CC_CPAS_AHB_CLK>,
+			 <&camcc CAM_CC_CPAS_FAST_AHB_CLK>,
+			 <&camcc CAM_CC_CSID_CLK>,
+			 <&camcc CAM_CC_CSID_CSIPHY_RX_CLK>,
+			 <&camcc CAM_CC_CAMNOC_AXI_CLK>,
+			 <&camcc CAM_CC_CAMNOC_AXI_CLK>,
+			 <&camcc CAM_CC_CPAS_IFE_0_CLK>,
+			 <&camcc CAM_CC_IFE_0_FAST_AHB_CLK>,
+			 <&camcc CAM_CC_IFE_0_CLK>,
+			 <&camcc CAM_CC_CPAS_IFE_1_CLK>,
+			 <&camcc CAM_CC_IFE_1_FAST_AHB_CLK>,
+			 <&camcc CAM_CC_IFE_1_CLK>,
+			 <&camcc CAM_CC_CPAS_IFE_2_CLK>,
+			 <&camcc CAM_CC_IFE_2_FAST_AHB_CLK>,
+			 <&camcc CAM_CC_IFE_2_CLK>,
+			 <&camcc CAM_CC_IFE_LITE_AHB_CLK>,
+			 <&camcc CAM_CC_CPAS_IFE_LITE_CLK>,
+			 <&camcc CAM_CC_IFE_LITE_CLK>,
+			 <&camcc CAM_CC_IFE_LITE_CSID_CLK>,
+			 <&camcc CAM_CC_CORE_AHB_CLK>,
+			 <&camcc CAM_CC_QDSS_DEBUG_XO_CLK>;
+		clock-names = "csiphy0",
+			      "csiphy0_timer",
+			      "csiphy1",
+			      "csiphy1_timer",
+			      "csiphy2",
+			      "csiphy2_timer",
+			      "csiphy3",
+			      "csiphy3_timer",
+			      "gcc_axi_hf",
+			      "gcc_axi_sf",
+			      "cpas_ahb",
+			      "cpas_fast_ahb",
+			      "csid",
+			      "csid_csiphy_rx",
+			      "camnoc_rt_axi",
+			      "camnoc_nrt_axi",
+			      "cpas_vfe0",
+			      "vfe0_fast_ahb",
+			      "vfe0",
+			      "cpas_vfe1",
+			      "vfe1_fast_ahb",
+			      "vfe1",
+			      "cpas_vfe2",
+			      "vfe2_fast_ahb",
+			      "vfe2",
+			      "vfe_lite_ahb",
+			      "cpas_vfe_lite",
+			      "vfe_lite",
+			      "vfe_lite_csid",
+			      "core_ahb",
+			      "qdss_debug_xo";
+
+		interrupts = <GIC_SPI 464 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 466 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 640 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 468 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 359 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 477 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 478 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 479 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 448 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 465 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 467 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 641 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 469 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 360 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "csid0",
+				  "csid1",
+				  "csid2",
+				  "csid_lite0",
+				  "csid_lite1",
+				  "csiphy0",
+				  "csiphy1",
+				  "csiphy2",
+				  "csiphy3",
+				  "vfe0",
+				  "vfe1",
+				  "vfe2",
+				  "vfe_lite0",
+				  "vfe_lite1";
+
+		vdda-phy-supply = <&pm8350_l5>;
+		vdda-pll-supply = <&pm8350c_l10>;
+
+		interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
+				 &config_noc SLAVE_CAMERA_CFG QCOM_ICC_TAG_ACTIVE_ONLY>,
+				<&mmss_noc MASTER_CAMNOC_HF QCOM_ICC_TAG_ALWAYS
+				 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>;
+		interconnect-names = "ahb",
+				     "hf_0_mnoc";
+
+		/* Android msm_cam_smmu_ife: SIDs 0x800/0x820/0x840/0x860/0xc00/0xc20/0xc40/0xc60 */
+		iommus = <&apps_smmu 0x800 0x460>;
+
+		power-domains = <&camcc IFE_0_GDSC>,
+				<&camcc IFE_1_GDSC>,
+				<&camcc IFE_2_GDSC>,
+				<&camcc TITAN_TOP_GDSC>;
+		power-domain-names = "ife0",
+				     "ife1",
+				     "ife2",
+				     "top";
+
+		status = "okay";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				csiphy0_ep: endpoint {
+					data-lanes = <0 1 2 3>;
+					bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+					remote-endpoint = <&imx355_ep>;
+				};
+			};
+
+			port@2 {
+				reg = <2>;
+				csiphy2_ep: endpoint {
+					data-lanes = <0 1 2>;
+					bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
+					remote-endpoint = <&ov64b40_ep>;
+				};
+			};
+		};
+	};
 };
