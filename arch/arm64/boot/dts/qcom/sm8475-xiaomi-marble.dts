@@ -1399,3 +1399,47 @@
 &cci1 {
 	status = "okay";
 };
+
+/* === KGSL OVERRIDES === */
+&gpu {
+	compatible = "qcom,adreno-gpu-gen7-4-0", "qcom,kgsl-3d0";
+	qcom,chipid = <0x07030002>;
+	qcom,gpu-model = "Adreno725v1";
+	qcom,initial-pwrlevel = <5>;
+	qcom,no-nap;
+	qcom,min-access-length = <0x20>;
+	qcom,ubwc-mode = <0x04>;
+	qcom,tzone-names = "gpuss-0", "gpuss-1";
+	qcom,bus-table-ddr = <0x00 0xbebc2 0x1ae1b6 0x209a8e 0x28973c 0x2dc6c0 0x5caf6a 0x65ce03 0x7cb163 0xa3140c 0xbe7f17 0xc7acf1>;
+	/delete-property/ operating-points-v2;
+
+	qcom,gpu-pwrlevels {
+		compatible = "qcom,gpu-pwrlevels";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		qcom,gpu-pwrlevel@0 { reg = <0>; qcom,gpu-freq = <580000000>; qcom,level = <0x90>; qcom,bus-freq = <11>; qcom,bus-min = <7>; qcom,bus-max = <11>; qcom,acd-level = <0x882e5ffd>; qcom,cx-level = <0xc0>; };
+		qcom,gpu-pwrlevel@1 { reg = <1>; qcom,gpu-freq = <515000000>; qcom,level = <0x80>; qcom,bus-freq = <6>; qcom,bus-min = <6>; qcom,bus-max = <8>; qcom,acd-level = <0x882e5ffd>; qcom,cx-level = <0x80>; };
+		qcom,gpu-pwrlevel@2 { reg = <2>; qcom,gpu-freq = <439000000>; qcom,level = <0x60>; qcom,bus-freq = <6>; qcom,bus-min = <3>; qcom,bus-max = <8>; qcom,acd-level = <0xc0285ffd>; qcom,cx-level = <0x80>; };
+		qcom,gpu-pwrlevel@3 { reg = <3>; qcom,gpu-freq = <364000000>; qcom,level = <0x50>; qcom,bus-freq = <3>; qcom,bus-min = <1>; qcom,bus-max = <6>; qcom,acd-level = <0xc0285ffd>; qcom,cx-level = <0x80>; };
+		qcom,gpu-pwrlevel@4 { reg = <4>; qcom,gpu-freq = <324000000>; qcom,level = <0x40>; qcom,bus-freq = <2>; qcom,bus-min = <1>; qcom,bus-max = <6>; qcom,acd-level = <0xc02a5ffd>; qcom,cx-level = <0x40>; };
+		qcom,gpu-pwrlevel@5 { reg = <5>; qcom,gpu-freq = <285000000>; qcom,level = <0x38>; qcom,bus-freq = <2>; qcom,bus-min = <1>; qcom,bus-max = <5>; qcom,acd-level = <0xc02c5ffd>; qcom,cx-level = <0x40>; };
+		qcom,gpu-pwrlevel@6 { reg = <6>; qcom,gpu-freq = <220000000>; qcom,level = <0x30>; qcom,bus-freq = <2>; qcom,bus-min = <1>; qcom,bus-max = <5>; qcom,acd-level = <0xc8285ffd>; qcom,cx-level = <0x40>; };
+	};
+};
+
+&gmu {
+	compatible = "qcom,gen7-gmu";
+};
+
+&{/thermal-zones/gpu-top-thermal} {
+	cooling-maps {
+		/delete-node/ map0;
+	};
+};
+
+&{/thermal-zones/gpu-bottom-thermal} {
+	cooling-maps {
+		/delete-node/ map0;
+	};
+};
+/* === END KGSL OVERRIDES === */
