@@ -12,6 +12,7 @@
 #include <linux/firmware.h>
 #include <linux/ktime.h>
 #include <linux/pm_domain.h>
+#include <linux/of.h>
 #include <linux/version.h>
 #if (KERNEL_VERSION(6, 3, 0) <= LINUX_VERSION_CODE)
 #include <linux/firmware/qcom/qcom_scm.h>
@@ -504,3 +505,12 @@ void kgsl_qcom_va_md_unregister(struct kgsl_device *device)
 		dev_err(device->dev, "Failed to unregister notifier with va_minidump: %d\n", ret);
 }
 #endif
+
+bool kgsl_is_standard_binding(struct device_node *node)
+{
+    if (!node) return false;
+    if (of_device_is_compatible(node, "qcom,adreno")) return true;
+    if (!of_find_property(node, "iommus", NULL)) return false;
+    return of_device_is_compatible(node, "qcom,kgsl-3d0") ||
+           of_device_is_compatible(node, "qcom,kgsl");
+}

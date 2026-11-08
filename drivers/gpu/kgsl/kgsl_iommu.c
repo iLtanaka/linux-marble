@@ -36,6 +36,7 @@
 #include "kgsl_pwrctrl.h"
 #include "kgsl_sharedmem.h"
 #include "kgsl_trace.h"
+#include "kgsl_util.h"
 
 #define KGSL_IOMMU_SPLIT_TABLE_BASE 0x0001ff8000000000ULL
 
@@ -1369,7 +1370,7 @@ static void kgsl_iommu_set_ttbr0(struct kgsl_iommu_context *context,
 	if (!context->domain)
 		return;
 
-	if (of_device_is_compatible(device->pdev->dev.of_node, "qcom,adreno"))
+	if (kgsl_is_standard_binding(device->pdev->dev.of_node))
 		adreno_smmu = kgsl_get_prvdata(device->dev);
 	else
 		adreno_smmu = dev_get_drvdata(&context->pdev->dev);
@@ -1508,7 +1509,7 @@ static int kgsl_iopgtbl_alloc(struct kgsl_iommu_context *ctx, struct kgsl_iommu_
 	struct adreno_smmu_priv *adreno_smmu;
 	const struct io_pgtable_cfg *cfg = NULL;
 
-	if (of_device_is_compatible(ctx->kgsldev->pdev->dev.of_node, "qcom,adreno"))
+	if (kgsl_is_standard_binding(ctx->kgsldev->pdev->dev.of_node))
 		adreno_smmu = kgsl_get_prvdata(ctx->kgsldev->dev);
 	else
 		adreno_smmu = dev_get_drvdata(&ctx->pdev->dev);

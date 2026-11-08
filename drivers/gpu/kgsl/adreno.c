@@ -1840,6 +1840,7 @@ static void adreno_setup_device(struct adreno_device *adreno_dev)
 static const struct of_device_id adreno_component_match[] = {
 	{ .compatible = "qcom,adreno-gmu" },
 	{ .compatible = "qcom,adreno-rgmu" },
+	{ .compatible = "qcom,gen7-gmu" },
 	{},
 };
 
@@ -4768,9 +4769,10 @@ static int adreno_probe(struct platform_device *pdev)
 	 * error for the device with "qcom,adreno". Also choose the match table
 	 * accordingly.
 	 */
-	if (of_device_is_compatible(pdev->dev.of_node, "qcom,adreno")) {
-		if (kgsl_is_compatible_node_available("qcom,kgsl") ||
-				kgsl_is_compatible_node_available("qcom,kgsl-3d0"))
+	if (kgsl_is_standard_binding(pdev->dev.of_node)) {
+		if (of_device_is_compatible(pdev->dev.of_node, "qcom,adreno") &&
+		    (kgsl_is_compatible_node_available("qcom,kgsl") ||
+		     kgsl_is_compatible_node_available("qcom,kgsl-3d0")))
 			return -ENODEV;
 		matches = adreno_component_match;
 	}

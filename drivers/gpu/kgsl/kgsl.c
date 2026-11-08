@@ -1484,7 +1484,7 @@ static int kgsl_release(struct inode *inodep, struct file *filep)
 	device->ftbl->device_private_destroy(dev_priv);
 
 	result = kgsl_close_device(device);
-	if (!of_device_is_compatible(device->pdev->dev.of_node, "qcom,adreno"))
+	if (!kgsl_is_standard_binding(device->pdev->dev.of_node))
 		pm_runtime_put(&device->pdev->dev);
 
 	return result;
@@ -1522,7 +1522,7 @@ static int kgsl_open(struct inode *inodep, struct file *filep)
 		return -ENODEV;
 	}
 
-	if (!of_device_is_compatible(device->pdev->dev.of_node, "qcom,adreno")) {
+	if (!kgsl_is_standard_binding(device->pdev->dev.of_node)) {
 		result = pm_runtime_get_sync(&device->pdev->dev);
 		if (result < 0) {
 			dev_err(device->dev,
@@ -5329,7 +5329,7 @@ int kgsl_device_platform_probe(struct kgsl_device *device)
 		return status;
 
 	/* Probe standard kgsl smmu dt bindings */
-	if (of_device_is_compatible(pdev->dev.of_node, "qcom,adreno"))
+	if (kgsl_is_standard_binding(pdev->dev.of_node))
 		kgsl_iommu_probe_standard(device, pdev);
 
 	/* Can return -EPROBE_DEFER */

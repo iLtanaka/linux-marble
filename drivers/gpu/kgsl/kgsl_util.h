@@ -169,6 +169,7 @@ int kgsl_clk_set_rate(struct clk_bulk_data *clks, int num_clks,
  * Return: true if a suitable device is available, false otherwise
  */
 bool kgsl_is_compatible_node_available(const char *compat);
+bool kgsl_is_standard_binding(struct device_node *node);
 
 /**
  * kgsl_attach_iommu_group() - Get iommu group and attach domain
