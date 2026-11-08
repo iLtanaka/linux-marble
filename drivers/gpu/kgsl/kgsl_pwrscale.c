@@ -239,16 +239,15 @@ static int kgsl_devfreq_target(struct device *dev, unsigned long *freq, u32 flag
 
 	if (!pwrscale->devfreq_enabled) {
 		/*
-		 * When we try to use performance governor, this function
-		 * will called by devfreq driver, while adding governor using
-		 * devfreq_add_device.
-		 * To add and start performance governor successfully during
-		 * probe, return 0 when we reach here. pwrscale->enabled will
-		 * be set to true after successfully starting the governor.
+		 * The GPU is idle or suspended.  Accept the request without
+		 * touching the power level; the governor reprograms the real
+		 * frequency once the GPU becomes active again.
+		 *
+		 * Returning -EPROTO here makes devfreq's PM QoS notifier fail
+		 * during boot (before the first GPU wakeup) and leaves the
+		 * device below its minimum QoS frequency.
 		 */
-		if (!pwrscale->enabled)
-			return 0;
-		return -EPROTO;
+		return 0;
 	}
 	pwr = &device->pwrctrl;
 
@@ -304,13 +303,14 @@ static int kgsl_devfreq_get_dev_status(struct device *dev,
 		 * When we try to use simple_ondemand governor, this function
 		 * will be called by devfreq driver, after devfreq_add_device()
 		 * and before we have a chance to suspend.
-		 * To add and start simple_ondemand governor successfully during
-		 * probe, return 0 when we reach here. pwrscale->enabled will
-		 * be set to true after successfully starting the governor.
+		 * Return zero stats instead of -EPROTO so that the governor
+		 * can start without failing on idle/suspended GPU.
 		 */
-		if (!pwrscale->enabled)
-			return 0;
-		return -EPROTO;
+		stat->total_time = 0;
+		stat->busy_time = 0;
+		stat->current_frequency = 0;
+		stat->private_data = NULL;
+		return 0;
 	}
 
 	kgsl_mutex_lock(&device->mutex);
@@ -376,25 +376,27 @@ static int kgsl_devfreq_get_dev_status(struct device *dev,
 static int kgsl_devfreq_get_cur_freq(struct device *dev, unsigned long *freq)
 {
 	struct kgsl_device *device = dev_get_drvdata(dev);
-	struct kgsl_pwrscale *pwrscale = &device->pwrscale;
 
 	if (device == NULL)
 		return -ENODEV;
 	if (freq == NULL)
 		return -EINVAL;
 
-	if (device->host_based_dcvs && !pwrscale->devfreq_enabled) {
-		/*
-		 * When we try to use performance governor, this function
-		 * will called by devfreq driver, while adding governor using
-		 * devfreq_add_device.
-		 * To add and start performance governor successfully during
-		 * probe, return 0 when we reach here. pwrscale->enabled will
-		 * be set to true after successfully starting the governor.
-		 */
-		if (!pwrscale->enabled)
-			return 0;
-		return -EPROTO;
+	/*
+	 * Report the configured power level even while the GPU is idle.
+	 * devfreq uses this value for its transition accounting, and
+	 * returning -EPROTO without filling @freq leaves it uninitialized.
+	 *
+	 * Before the first GPU wakeup completes, adreno_start() can hold
+	 * device->mutex while requesting firmware, and request_firmware()
+	 * takes dev_pm_qos_mtx.  A devfreq update already holds that mutex,
+	 * so taking device->mutex here would deadlock.  active_pwrlevel is
+	 * a single aligned word and the pwrlevels array is immutable after
+	 * probe, so it can be read safely without the mutex in this window.
+	 */
+	if (!device->pwrscale.devfreq_enabled) {
+		*freq = kgsl_pwrctrl_active_freq(&device->pwrctrl);
+		return 0;
 	}
 
 	kgsl_mutex_lock(&device->mutex);
@@ -418,8 +420,13 @@ static int kgsl_busmon_get_dev_status(struct device *dev,
 	struct xstats *b;
 	struct kgsl_device *device = dev_get_drvdata(dev);
 
-	if (!device->pwrscale.devfreq_enabled)
-		return -EPROTO;
+	if (!device->pwrscale.devfreq_enabled) {
+		stat->total_time = 0;
+		stat->busy_time = 0;
+		stat->current_frequency = 0;
+		stat->private_data = NULL;
+		return 0;
+	}
 
 	stat->total_time = last_status.total_time;
 	stat->busy_time = last_status.busy_time;
@@ -475,7 +482,7 @@ static int kgsl_busmon_target(struct device *dev, unsigned long *freq, u32 flags
 	if (!device->pwrscale.enabled)
 		return 0;
 	if (!device->pwrscale.devfreq_enabled)
-		return -EPROTO;
+		return 0;
 
 	pwr = &device->pwrctrl;
 
@@ -534,6 +541,7 @@ static int kgsl_busmon_target(struct device *dev, unsigned long *freq, u32 flags
 
 static int kgsl_busmon_get_cur_freq(struct device *dev, unsigned long *freq)
 {
+	*freq = 0;
 	return 0;
 }
 
@@ -827,10 +835,23 @@ static int kgsl_pwrscale_governor_init(struct kgsl_device *device, struct platfo
 	} else if (!strcmp(governor, "msm-adreno-tz")) {
 		gpu_profile->profile.polling_ms = 10;
 		ret = kgsl_pwrscale_adreno_tz_init(device, pdev, governor);
-		if (ret)
-			return ret;
-
-		data = &adreno_tz_data;
+		if (ret) {
+			/*
+			 * msm-adreno-tz depends on optional TrustZone DCVS
+			 * support.  If the firmware does not provide it, keep
+			 * GPU frequency scaling alive with the generic
+			 * governor instead of leaving the GPU stuck at its
+			 * initial power level.
+			 */
+			dev_warn(device->dev,
+				"msm-adreno-tz is not usable (%d), falling back to simple_ondemand\n",
+				ret);
+			governor = "simple_ondemand";
+			gpu_profile->profile.polling_ms = 50;
+			data = &ondemand_data;
+		} else {
+			data = &adreno_tz_data;
+		}
 	} else {
 		dev_err(&pdev->dev, "Unknown GPU governor: %s\n", governor);
 		return -EINVAL;
@@ -856,10 +877,29 @@ static int kgsl_pwrscale_governor_init(struct kgsl_device *device, struct platfo
 
 	devfreq = devfreq_add_device(&pdev->dev, &gpu_profile->profile,
 			governor, data);
+	if (IS_ERR_OR_NULL(devfreq) && !strcmp(governor, "msm-adreno-tz")) {
+		ret = IS_ERR(devfreq) ? PTR_ERR(devfreq) : -ENOMEM;
+		/*
+		 * The governor registered fine but refused to start, which is
+		 * what happens when the TZ DCVS init call fails.  Retry with
+		 * simple_ondemand so devfreq is still created.
+		 */
+		dev_warn(device->dev,
+			"msm-adreno-tz failed to start (%d), falling back to simple_ondemand\n",
+			ret);
+		governor = "simple_ondemand";
+		gpu_profile->profile.polling_ms = 50;
+		data = &ondemand_data;
+		devfreq = devfreq_add_device(&pdev->dev, &gpu_profile->profile,
+				governor, data);
+	}
+
 	if (IS_ERR_OR_NULL(devfreq)) {
 		device->pwrscale.enabled = false;
 		destroy_workqueue(pwrscale->devfreq_wq);
+		pwrscale->devfreq_wq = NULL;
 		kthread_destroy_worker(pwrscale->devfreq_notify_worker);
+		pwrscale->devfreq_notify_worker = NULL;
 		kgsl_gpu_governor_cleanup();
 		ret = IS_ERR(devfreq) ? PTR_ERR(devfreq) : -ENOMEM;
 		dev_err(device->dev, "Failed to add devfreq device for %s governor: %d\n",

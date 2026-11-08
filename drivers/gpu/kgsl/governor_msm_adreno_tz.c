@@ -247,8 +247,10 @@ static int tz_init(struct device *dev, struct devfreq_msm_adreno_tz_data *priv,
 	struct qcom_tzmem_pool_config pool_config;
 	static struct qcom_tzmem_pool *tzmem_pool;
 
-	if (!qcom_scm_dcvs_core_available())
+	if (!qcom_scm_dcvs_core_available()) {
+		pr_err(TAG "tz: DCVS core calls are not available\n");
 		return -EINVAL;
+	}
 
 	memset(&pool_config, 0, sizeof(pool_config));
 	pool_config.initial_size = PAGE_ALIGN(size_pwrlevels);
@@ -275,10 +277,13 @@ static int tz_init(struct device *dev, struct devfreq_msm_adreno_tz_data *priv,
 	mb();
 
 	ret = qcom_scm_dcvs_init_v2(paddr, size_pwrlevels, version);
-
-	if (ret)
+	if (ret) {
+		pr_err(TAG "tz: DCVS init v2 failed: %d (version %u)\n",
+			ret, *version);
 		goto free_tzmem;
+	}
 
+	pr_info(TAG "tz: DCVS init v2 succeeded, version %u\n", *version);
 	priv->is_64 = true;
 
 	 /*
@@ -393,14 +398,22 @@ static int tz_init(struct device *dev, struct devfreq_msm_adreno_tz_data *priv,
 			PAGE_ALIGN(size_pwrlevels), DMA_BIDIRECTIONAL);
 
 		ret = qcom_scm_dcvs_init_v2(paddr, size_pwrlevels, version);
-		if (!ret)
+		if (!ret) {
 			priv->is_64 = true;
+			pr_info(TAG "tz: DCVS init v2 succeeded, version %u\n",
+				*version);
+		} else {
+			pr_err(TAG "tz: DCVS init v2 failed: %d (version %u)\n",
+				ret, *version);
+		}
 		if (!qtee_shmbridge_is_enabled())
 			kfree_sensitive(tz_buf);
 		else
 			qtee_shmbridge_free_shm(&shm);
-	} else
+	} else {
+		pr_err(TAG "tz: DCVS core calls are not available\n");
 		ret = -EINVAL;
+	}
 
 	 /* Initialize context aware feature, if enabled. */
 	if (!ret && priv->ctxt_aware_enable) {
@@ -527,7 +540,7 @@ static int __tz_init(struct devfreq *devfreq)
 	struct devfreq_msm_adreno_tz_data *priv;
 	unsigned int tz_pwrlevels[MSM_ADRENO_MAX_PWRLEVELS + 1];
 	int i, out, ret;
-	unsigned int version;
+	unsigned int version = 0;
 
 	struct msm_adreno_extended_profile *gpu_profile = container_of(
 					(devfreq->profile),
@@ -557,7 +570,8 @@ static int __tz_init(struct devfreq *devfreq)
 	ret = tz_init(&devfreq->dev, priv, tz_pwrlevels, sizeof(tz_pwrlevels),
 			&version, sizeof(version));
 	if (ret != 0 || version > MAX_TZ_VERSION) {
-		pr_err(TAG "tz_init failed\n");
+		pr_err(TAG "tz_init failed: ret %d, version %u, max %d\n",
+			ret, version, MAX_TZ_VERSION);
 		return ret;
 	}
 
