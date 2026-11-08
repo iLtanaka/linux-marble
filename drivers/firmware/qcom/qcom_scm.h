@@ -110,6 +110,7 @@ int qcom_scm_shm_bridge_enable(struct device *scm_dev);
 #define QCOM_SCM_SVC_IO			0x05
 #define QCOM_SCM_IO_READ		0x01
 #define QCOM_SCM_IO_WRITE		0x02
+#define QCOM_SCM_IO_RESET		0x03
 
 #define QCOM_SCM_SVC_INFO		0x06
 #define QCOM_SCM_INFO_IS_CALL_AVAIL	0x01
@@ -125,6 +126,15 @@ int qcom_scm_shm_bridge_enable(struct device *scm_dev);
 #define QCOM_SCM_MP_SHM_BRIDGE_ENABLE		0x1c
 #define QCOM_SCM_MP_SHM_BRIDGE_DELETE		0x1d
 #define QCOM_SCM_MP_SHM_BRIDGE_CREATE		0x1e
+
+#define QCOM_SCM_SVC_DCVS		0x0d
+#define QCOM_SCM_DCVS_RESET		0x07
+#define QCOM_SCM_DCVS_UPDATE		0x08
+#define QCOM_SCM_DCVS_INIT		0x09
+#define QCOM_SCM_DCVS_UPDATE_V2		0x0a
+#define QCOM_SCM_DCVS_INIT_V2		0x0b
+#define QCOM_SCM_DCVS_INIT_CA_V2	0x0c
+#define QCOM_SCM_DCVS_UPDATE_CA_V2	0x0d
 
 #define QCOM_SCM_SVC_OCMEM		0x0f
 #define QCOM_SCM_OCMEM_LOCK_CMD		0x01

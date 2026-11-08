@@ -96,6 +96,7 @@ int qcom_scm_pas_prepare_and_auth_reset(struct qcom_scm_pas_context *ctx);
 
 int qcom_scm_io_readl(phys_addr_t addr, unsigned int *val);
 int qcom_scm_io_writel(phys_addr_t addr, unsigned int val);
+int qcom_scm_io_reset(void);
 
 bool qcom_scm_restore_sec_cfg_available(void);
 int qcom_scm_restore_sec_cfg(u32 device_id, u32 spare);
@@ -138,6 +139,16 @@ int qcom_scm_lmh_dcvsh(u32 payload_fn, u32 payload_reg, u32 payload_val,
 		       u64 limit_node, u32 node_id, u64 version);
 int qcom_scm_lmh_profile_change(u32 profile_id);
 bool qcom_scm_lmh_dcvsh_available(void);
+
+bool qcom_scm_dcvs_core_available(void);
+bool qcom_scm_dcvs_ca_available(void);
+int qcom_scm_dcvs_reset(void);
+int qcom_scm_dcvs_init_v2(phys_addr_t addr, size_t size, int *version);
+int qcom_scm_dcvs_init_ca_v2(phys_addr_t addr, size_t size);
+int qcom_scm_dcvs_update(int level, s64 total_time, s64 busy_time);
+int qcom_scm_dcvs_update_v2(int level, s64 total_time, s64 busy_time);
+int qcom_scm_dcvs_update_ca_v2(int level, s64 total_time, s64 busy_time,
+			       int context_count);
 
 /*
  * Request TZ to program set of access controlled registers necessary
