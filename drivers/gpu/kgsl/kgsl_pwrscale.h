@@ -89,6 +89,10 @@ void kgsl_pwrscale_governor_disable(struct kgsl_device *device, bool turbo);
 void kgsl_pwrscale_fast_bus_hint(bool on);
 
 #if IS_ENABLED(CONFIG_DEVFREQ_GOV_QCOM_ADRENO_TZ)
+int msm_adreno_tz_init(void);
+
+void msm_adreno_tz_exit(void);
+#else
 static inline int msm_adreno_tz_init(void)
 {
 	return 0;
@@ -97,13 +101,13 @@ static inline int msm_adreno_tz_init(void)
 static inline void msm_adreno_tz_exit(void)
 {
 }
-#else
-int msm_adreno_tz_init(void);
-
-void msm_adreno_tz_exit(void);
 #endif
 
 #if IS_ENABLED(CONFIG_DEVFREQ_GOV_QCOM_GPUBW_MON)
+int devfreq_gpubw_init(void);
+
+void devfreq_gpubw_exit(void);
+#else
 static inline int devfreq_gpubw_init(void)
 {
 	return 0;
@@ -112,10 +116,6 @@ static inline int devfreq_gpubw_init(void)
 static inline void devfreq_gpubw_exit(void)
 {
 }
-#else
-int devfreq_gpubw_init(void);
-
-void devfreq_gpubw_exit(void);
 #endif
 
 bool kgsl_is_msm_adreno_tz_governor(struct kgsl_device *device);
