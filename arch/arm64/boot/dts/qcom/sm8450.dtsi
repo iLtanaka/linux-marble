@@ -2905,8 +2905,8 @@
 				      "hub",
 				      "demet";
 
-			power-domains = <&gpucc GPU_CX_GDSC>,
-					<&gpucc GPU_GX_GDSC>;
+			power-domains = <&rpmhpd RPMHPD_CX>,
+					<&rpmhpd RPMHPD_GFX>;
 			power-domain-names = "cx",
 					     "gx";
 
