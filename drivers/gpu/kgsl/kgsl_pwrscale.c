@@ -1,0 +1,1004 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Copyright (c) 2010-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ */
+
+#include <linux/devfreq.h>
+#include <linux/devfreq_cooling.h>
+#include <linux/slab.h>
+
+#include "kgsl_bus.h"
+#include "kgsl_device.h"
+#include "kgsl_pwrscale.h"
+#include "kgsl_trace.h"
+#include "kgsl_util.h"
+
+static struct devfreq_msm_adreno_tz_data adreno_tz_data = {
+	.bus = {
+		.max = 350,
+		.floating = true,
+	},
+	.mod_percent = 100,
+};
+
+static void do_devfreq_suspend(struct work_struct *work);
+static void do_devfreq_resume(struct work_struct *work);
+static void do_devfreq_notify(struct kthread_work *work);
+
+bool kgsl_is_msm_adreno_tz_governor(struct kgsl_device *device)
+{
+	return !strcmp(CONFIG_QCOM_ADRENO_DEFAULT_GOVERNOR, "msm-adreno-tz");
+}
+
+
+/*
+ * These variables are used to keep the latest data
+ * returned by kgsl_devfreq_get_dev_status
+ */
+static struct xstats last_xstats;
+static struct devfreq_dev_status last_status = { .private_data = &last_xstats };
+
+/*
+ * kgsl_pwrscale_fast_bus_hint - enable fast_bus_hint feature in
+ * adreno_tz governer
+ * @on: boolean flag to ON/OFF fast_bus_hint
+ *
+ * Called when fast_bus_hint feature should be enabled.
+ */
+void kgsl_pwrscale_fast_bus_hint(bool on)
+{
+	adreno_tz_data.fast_bus_hint = on;
+}
+
+/*
+ * kgsl_pwrscale_sleep - notify governor that device is going off
+ * @device: The device
+ *
+ * Called shortly after all pending work is completed.
+ */
+void kgsl_pwrscale_sleep(struct kgsl_device *device)
+{
+	if (!device->pwrscale.enabled)
+		return;
+
+	/* to call devfreq_suspend_device() from a kernel thread */
+	queue_work(device->pwrscale.devfreq_wq,
+		&device->pwrscale.devfreq_suspend_ws);
+}
+
+/*
+ * kgsl_pwrscale_wake - notify governor that device is going on
+ * @device: The device
+ *
+ * Called when the device is returning to an active state.
+ */
+void kgsl_pwrscale_wake(struct kgsl_device *device)
+{
+	struct kgsl_power_stats stats;
+	struct kgsl_pwrscale *psc = &device->pwrscale;
+
+	if (!device->pwrscale.enabled)
+		return;
+	/* clear old stats before waking */
+	memset(&psc->accum_stats, 0, sizeof(psc->accum_stats));
+	memset(&last_xstats, 0, sizeof(last_xstats));
+
+	/* and any hw activity from waking up*/
+	device->ftbl->power_stats(device, &stats);
+
+	psc->time = ktime_get();
+
+	psc->next_governor_call = ktime_add_us(psc->time,
+			KGSL_GOVERNOR_CALL_INTERVAL);
+
+	/* to call devfreq_resume_device() from a kernel thread */
+	queue_work(psc->devfreq_wq, &psc->devfreq_resume_ws);
+}
+
+/**
+ * kgsl_pwrscale_update_stats() - update device busy statistics
+ * @device: The device
+ *
+ * Read hardware busy counters and accumulate the results.
+ */
+void kgsl_pwrscale_update_stats(struct kgsl_device *device)
+{
+	struct kgsl_pwrctrl *pwrctrl = &device->pwrctrl;
+	struct kgsl_pwrscale *psc = &device->pwrscale;
+
+	if (WARN_ON(!kgsl_mutex_is_locked(&device->mutex)))
+		return;
+
+	if (!psc->enabled)
+		return;
+
+	if (device->state == KGSL_STATE_ACTIVE) {
+		struct kgsl_power_stats stats;
+		ktime_t cur_time = ktime_get();
+
+		device->ftbl->power_stats(device, &stats);
+		device->pwrscale.accum_stats.busy_time += stats.busy_time;
+		device->pwrscale.accum_stats.ram_time += stats.ram_time;
+		device->pwrscale.accum_stats.ram_wait += stats.ram_wait;
+		pwrctrl->clock_times[pwrctrl->active_pwrlevel] +=
+				stats.busy_time;
+		if (pwrctrl->thermal_pwrlevel)
+			pwrctrl->thermal_time += stats.busy_time;
+		pwrctrl->time_in_pwrlevel[pwrctrl->active_pwrlevel] +=
+			ktime_us_delta(cur_time, pwrctrl->last_stat_updated);
+		pwrctrl->last_stat_updated = cur_time;
+	}
+}
+
+/**
+ * kgsl_pwrscale_update() - update device busy statistics
+ * @device: The device
+ *
+ * If enough time has passed schedule the next call to devfreq
+ * get_dev_status.
+ */
+void kgsl_pwrscale_update(struct kgsl_device *device)
+{
+	ktime_t t;
+	struct kgsl_pwrscale *pwrscale = &device->pwrscale;
+
+	if (WARN_ON(!kgsl_mutex_is_locked(&device->mutex)))
+		return;
+
+	if (!pwrscale->enabled)
+		return;
+
+	t = ktime_get();
+	if (ktime_compare(t, pwrscale->next_governor_call) < 0)
+		return;
+
+	pwrscale->next_governor_call = ktime_add_us(t,
+			KGSL_GOVERNOR_CALL_INTERVAL);
+
+	/* to call update_devfreq() from a kernel thread */
+	if (device->state != KGSL_STATE_SLUMBER)
+		kthread_queue_work(pwrscale->devfreq_notify_worker,
+					&pwrscale->devfreq_notify_work);
+}
+
+/*
+ * kgsl_pwrscale_governor_disable - temporarily disable the governor
+ * @device: Pointer to KGSL device
+ * @turbo: Indicates if pwrlevel should be forced to turbo
+ *
+ * Temporarily disable the governor, to prevent interference
+ * with profiling tools that expect a fixed clock frequency.
+ * This function must be called with the device mutex locked.
+ */
+void kgsl_pwrscale_governor_disable(struct kgsl_device *device, bool turbo)
+{
+	if (WARN_ON(!kgsl_mutex_is_locked(&device->mutex)))
+		return;
+
+	if (device->pwrscale.devfreqptr)
+		queue_work(device->pwrscale.devfreq_wq,
+			&device->pwrscale.devfreq_suspend_ws);
+	device->pwrscale.enabled = false;
+	if (turbo)
+		kgsl_pwrctrl_pwrlevel_change(device, 0);
+}
+
+/*
+ * kgsl_pwrscale_governor_enable - re-enable the  governor
+ * @device: Pointer to KGSL device
+ *
+ * Reenable the governor after a kgsl_pwrscale_governor_disable() call.
+ * This function must be called with the device mutex locked.
+ */
+void kgsl_pwrscale_governor_enable(struct kgsl_device *device)
+{
+	if (WARN_ON(!kgsl_mutex_is_locked(&device->mutex)))
+		return;
+
+	if (device->pwrscale.devfreqptr) {
+		queue_work(device->pwrscale.devfreq_wq,
+			&device->pwrscale.devfreq_resume_ws);
+		device->pwrscale.enabled = true;
+	} else {
+		/*
+		 * Don't enable it if devfreq is not set and let the device
+		 * run at default level;
+		 */
+		kgsl_pwrctrl_pwrlevel_change(device,
+					device->pwrctrl.default_pwrlevel);
+		device->pwrscale.enabled = false;
+	}
+}
+
+/*
+ * kgsl_devfreq_target - devfreq_dev_profile.target callback
+ * @dev: see devfreq.h
+ * @freq: see devfreq.h
+ * @flags: see devfreq.h
+ *
+ * This is a devfreq callback function for dcvs recommendations and
+ * thermal constraints. If any thermal constraints are present,
+ * devfreq adjusts the gpu frequency range to cap the max frequency
+ * thereby not recommending anything above the constraint.
+ * This function expects the device mutex to be unlocked.
+ */
+static int kgsl_devfreq_target(struct device *dev, unsigned long *freq, u32 flags)
+{
+	struct kgsl_device *device = dev_get_drvdata(dev);
+	struct kgsl_pwrctrl *pwr;
+	int level;
+	unsigned int i;
+	unsigned long cur_freq, rec_freq;
+	struct kgsl_pwrscale *pwrscale = &device->pwrscale;
+
+	if (device == NULL)
+		return -ENODEV;
+	if (freq == NULL)
+		return -EINVAL;
+
+	if (!pwrscale->devfreq_enabled) {
+		/*
+		 * When we try to use performance governor, this function
+		 * will called by devfreq driver, while adding governor using
+		 * devfreq_add_device.
+		 * To add and start performance governor successfully during
+		 * probe, return 0 when we reach here. pwrscale->enabled will
+		 * be set to true after successfully starting the governor.
+		 */
+		if (!pwrscale->enabled)
+			return 0;
+		return -EPROTO;
+	}
+	pwr = &device->pwrctrl;
+
+	rec_freq = *freq;
+
+	kgsl_mutex_lock(&device->mutex);
+	cur_freq = kgsl_pwrctrl_active_freq(pwr);
+	level = pwr->active_pwrlevel;
+
+	/* If the governor recommends a new frequency, update it here */
+	if (rec_freq != cur_freq) {
+		for (i = 0; i < pwr->num_pwrlevels; i++)
+			if (rec_freq == pwr->pwrlevels[i].gpu_freq) {
+				level = i;
+				break;
+			}
+		if (level != pwr->active_pwrlevel)
+			kgsl_pwrctrl_pwrlevel_change(device, level);
+	}
+
+	*freq = kgsl_pwrctrl_active_freq(pwr);
+
+	kgsl_mutex_unlock(&device->mutex);
+	return 0;
+}
+
+/*
+ * kgsl_devfreq_get_dev_status - devfreq_dev_profile.get_dev_status callback
+ * @dev: see devfreq.h
+ * @freq: see devfreq.h
+ * @flags: see devfreq.h
+ *
+ * This function expects the device mutex to be unlocked.
+ */
+static int kgsl_devfreq_get_dev_status(struct device *dev,
+				struct devfreq_dev_status *stat)
+{
+	struct kgsl_device *device = dev_get_drvdata(dev);
+	struct kgsl_pwrctrl *pwrctrl;
+	struct kgsl_pwrscale *pwrscale;
+	ktime_t tmp1, tmp2;
+
+	if (device == NULL)
+		return -ENODEV;
+	if (stat == NULL)
+		return -EINVAL;
+
+	pwrscale = &device->pwrscale;
+	pwrctrl = &device->pwrctrl;
+
+	if (!pwrscale->devfreq_enabled) {
+		/*
+		 * When we try to use simple_ondemand governor, this function
+		 * will be called by devfreq driver, after devfreq_add_device()
+		 * and before we have a chance to suspend.
+		 * To add and start simple_ondemand governor successfully during
+		 * probe, return 0 when we reach here. pwrscale->enabled will
+		 * be set to true after successfully starting the governor.
+		 */
+		if (!pwrscale->enabled)
+			return 0;
+		return -EPROTO;
+	}
+
+	kgsl_mutex_lock(&device->mutex);
+
+	tmp1 = ktime_get();
+	/*
+	 * If the GPU clock is on grab the latest power counter
+	 * values.  Otherwise the most recent ACTIVE values will
+	 * already be stored in accum_stats.
+	 */
+	kgsl_pwrscale_update_stats(device);
+
+	tmp2 = ktime_get();
+	stat->total_time = ktime_us_delta(tmp2, pwrscale->time);
+	pwrscale->time = tmp1;
+
+	stat->busy_time = pwrscale->accum_stats.busy_time;
+
+	stat->current_frequency = kgsl_pwrctrl_active_freq(&device->pwrctrl);
+
+	stat->private_data = &device->active_context_count;
+
+	/*
+	 * keep the latest devfreq_dev_status values
+	 * and vbif counters data
+	 * to be (re)used by kgsl_busmon_get_dev_status()
+	 */
+	if (pwrctrl->bus_control) {
+		struct kgsl_pwrlevel *pwrlevel;
+		struct xstats *last_b =
+			(struct xstats *)last_status.private_data;
+
+		last_status.total_time = stat->total_time;
+		last_status.busy_time = stat->busy_time;
+		last_status.current_frequency = stat->current_frequency;
+
+		last_b->ram_time = device->pwrscale.accum_stats.ram_time;
+		last_b->ram_wait = device->pwrscale.accum_stats.ram_wait;
+		last_b->buslevel = device->pwrctrl.cur_dcvs_buslevel;
+
+		pwrlevel = &pwrctrl->pwrlevels[pwrctrl->min_pwrlevel];
+		last_b->gpu_minfreq = pwrlevel->gpu_freq;
+	}
+
+	kgsl_pwrctrl_busy_time(device, stat->total_time, stat->busy_time, 0);
+	trace_kgsl_pwrstats(device, stat->total_time,
+		&pwrscale->accum_stats, device->active_context_count, 0);
+	memset(&pwrscale->accum_stats, 0, sizeof(pwrscale->accum_stats));
+
+	kgsl_mutex_unlock(&device->mutex);
+
+	return 0;
+}
+
+/*
+ * kgsl_devfreq_get_cur_freq - devfreq_dev_profile.get_cur_freq callback
+ * @dev: see devfreq.h
+ * @freq: see devfreq.h
+ * @flags: see devfreq.h
+ *
+ * This function expects the device mutex to be unlocked.
+ */
+static int kgsl_devfreq_get_cur_freq(struct device *dev, unsigned long *freq)
+{
+	struct kgsl_device *device = dev_get_drvdata(dev);
+	struct kgsl_pwrscale *pwrscale = &device->pwrscale;
+
+	if (device == NULL)
+		return -ENODEV;
+	if (freq == NULL)
+		return -EINVAL;
+
+	if (device->host_based_dcvs && !pwrscale->devfreq_enabled) {
+		/*
+		 * When we try to use performance governor, this function
+		 * will called by devfreq driver, while adding governor using
+		 * devfreq_add_device.
+		 * To add and start performance governor successfully during
+		 * probe, return 0 when we reach here. pwrscale->enabled will
+		 * be set to true after successfully starting the governor.
+		 */
+		if (!pwrscale->enabled)
+			return 0;
+		return -EPROTO;
+	}
+
+	kgsl_mutex_lock(&device->mutex);
+	*freq = kgsl_pwrctrl_active_freq(&device->pwrctrl);
+	kgsl_mutex_unlock(&device->mutex);
+
+	return 0;
+}
+
+/*
+ * kgsl_busmon_get_dev_status - devfreq_dev_profile.get_dev_status callback
+ * @dev: see devfreq.h
+ * @freq: see devfreq.h
+ * @flags: see devfreq.h
+ *
+ * This function expects the device mutex to be unlocked.
+ */
+static int kgsl_busmon_get_dev_status(struct device *dev,
+			struct devfreq_dev_status *stat)
+{
+	struct xstats *b;
+	struct kgsl_device *device = dev_get_drvdata(dev);
+
+	if (!device->pwrscale.devfreq_enabled)
+		return -EPROTO;
+
+	stat->total_time = last_status.total_time;
+	stat->busy_time = last_status.busy_time;
+	stat->current_frequency = last_status.current_frequency;
+
+	if (stat->private_data) {
+		struct xstats *last_b =
+			(struct xstats *)last_status.private_data;
+		b = (struct xstats *)stat->private_data;
+		b->ram_time = last_b->ram_time;
+		b->ram_wait = last_b->ram_wait;
+		b->buslevel = last_b->buslevel;
+		b->gpu_minfreq = last_b->gpu_minfreq;
+	}
+	return 0;
+}
+
+static int _read_hint(u32 flags)
+{
+	switch (flags) {
+	case BUSMON_FLAG_FAST_HINT:
+		return 1;
+	case BUSMON_FLAG_SUPER_FAST_HINT:
+		return 2;
+	case BUSMON_FLAG_SLOW_HINT:
+		return -1;
+	default:
+		return 0;
+	}
+}
+
+/*
+ * kgsl_busmon_target - devfreq_dev_profile.target callback
+ * @dev: see devfreq.h
+ * @freq: see devfreq.h
+ * @flags: see devfreq.h
+ *
+ * This function expects the device mutex to be unlocked.
+ */
+static int kgsl_busmon_target(struct device *dev, unsigned long *freq, u32 flags)
+{
+	struct kgsl_device *device = dev_get_drvdata(dev);
+	struct kgsl_pwrctrl *pwr;
+	struct kgsl_pwrlevel *pwr_level;
+	int  level, b;
+	u32 bus_flag;
+	unsigned long ab_mbytes;
+
+	if (device == NULL)
+		return -ENODEV;
+	if (freq == NULL)
+		return -EINVAL;
+	if (!device->pwrscale.enabled)
+		return 0;
+	if (!device->pwrscale.devfreq_enabled)
+		return -EPROTO;
+
+	pwr = &device->pwrctrl;
+
+	if (!pwr->bus_control)
+		return 0;
+
+	kgsl_mutex_lock(&device->mutex);
+	level = pwr->active_pwrlevel;
+	pwr_level = &pwr->pwrlevels[level];
+	bus_flag = device->pwrscale.bus_profile.flag;
+	device->pwrscale.bus_profile.flag = 0;
+	ab_mbytes = device->pwrscale.bus_profile.ab_mbytes;
+
+	/*
+	 * Bus devfreq governor has calculated its recomendations
+	 * when gpu was running with *freq frequency.
+	 * If the gpu frequency is different now it's better to
+	 * ignore the call
+	 */
+	if (pwr_level->gpu_freq != *freq) {
+		kgsl_mutex_unlock(&device->mutex);
+		return 0;
+	}
+
+	b = pwr->bus_mod;
+	pwr->bus_mod += _read_hint(bus_flag);
+
+	/* trim calculated change to fit range */
+	if (pwr_level->bus_freq + pwr->bus_mod < pwr_level->bus_min)
+		pwr->bus_mod = -(pwr_level->bus_freq - pwr_level->bus_min);
+	else if (pwr_level->bus_freq + pwr->bus_mod > pwr_level->bus_max)
+		pwr->bus_mod = pwr_level->bus_max - pwr_level->bus_freq;
+
+	/* Update bus vote if AB or IB is modified */
+	if ((pwr->bus_mod != b) || (pwr->bus_ab_mbytes != ab_mbytes)) {
+		pwr->bus_percent_ab = device->pwrscale.bus_profile.percent_ab;
+		/*
+		 * When gpu is thermally throttled to its lowest power level,
+		 * drop GPU's AB vote as a last resort to lower CX voltage and
+		 * to prevent thermal reset.
+		 * Ignore this check when only single power level in use to
+		 * avoid setting default AB vote in normal situations too.
+		 */
+		if ((pwr->thermal_pwrlevel != pwr->num_pwrlevels - 1 &&
+			pwr->pmqos_max_pwrlevel != pwr->num_pwrlevels - 1) ||
+			pwr->num_pwrlevels == 1)
+			pwr->bus_ab_mbytes = ab_mbytes;
+		else
+			pwr->bus_ab_mbytes = 0;
+		kgsl_bus_update(device, KGSL_BUS_VOTE_ON);
+	}
+
+	kgsl_mutex_unlock(&device->mutex);
+	return 0;
+}
+
+static int kgsl_busmon_get_cur_freq(struct device *dev, unsigned long *freq)
+{
+	return 0;
+}
+
+static void busmon_dev_release(struct device *dev)
+{
+}
+
+static void pwrscale_busmon_create(struct kgsl_device *device,
+		struct platform_device *pdev, unsigned long *table)
+{
+	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
+	struct kgsl_pwrscale *pwrscale = &device->pwrscale;
+	struct device *dev = &pwrscale->busmondev;
+	struct msm_busmon_extended_profile *bus_profile;
+	struct devfreq *bus_devfreq;
+	int i, ret;
+
+	bus_profile = &pwrscale->bus_profile;
+	bus_profile->private_data = &adreno_tz_data;
+
+	bus_profile->profile.target = kgsl_busmon_target;
+	bus_profile->profile.get_dev_status = kgsl_busmon_get_dev_status;
+	bus_profile->profile.get_cur_freq = kgsl_busmon_get_cur_freq;
+
+	bus_profile->profile.max_state = pwr->num_pwrlevels;
+	bus_profile->profile.freq_table = table;
+
+	dev->parent = &pdev->dev;
+	dev->release = busmon_dev_release;
+
+	dev_set_name(dev, "kgsl-busmon");
+	dev_set_drvdata(dev, device);
+	if (device_register(dev)) {
+		put_device(dev);
+		return;
+	}
+
+	/* Build out the OPP table for the busmon device */
+	for (i = 0; i < pwr->num_pwrlevels; i++) {
+		if (!pwr->pwrlevels[i].gpu_freq)
+			continue;
+
+		dev_pm_opp_add(dev, pwr->pwrlevels[i].gpu_freq, 0);
+	}
+
+	ret = devfreq_gpubw_init();
+	if (ret) {
+		dev_err(&pdev->dev, "Failed to add busmon governor: %d\n", ret);
+		dev_pm_opp_remove_all_dynamic(dev);
+		device_unregister(dev);
+		return;
+	}
+
+	bus_devfreq = devfreq_add_device(dev, &pwrscale->bus_profile.profile,
+		"gpubw_mon", NULL);
+
+	if (IS_ERR_OR_NULL(bus_devfreq)) {
+		dev_err(&pdev->dev, "Bus scaling not enabled\n");
+		devfreq_gpubw_exit();
+		dev_pm_opp_remove_all_dynamic(dev);
+		device_unregister(dev);
+		return;
+	}
+
+	pwrscale->bus_devfreq = bus_devfreq;
+}
+
+static void pwrscale_of_get_ca_target_pwrlevel(struct kgsl_device *device,
+		struct device_node *node)
+{
+	u32 pwrlevel = 1;
+
+	of_property_read_u32(node, "qcom,ca-target-pwrlevel", &pwrlevel);
+
+	if (pwrlevel >= device->pwrctrl.num_pwrlevels)
+		pwrlevel = 1;
+
+	device->pwrscale.ctxt_aware_target_pwrlevel = pwrlevel;
+}
+
+/* Get context aware properties */
+static void pwrscale_of_ca_aware(struct kgsl_device *device)
+{
+	struct kgsl_pwrscale *pwrscale = &device->pwrscale;
+	struct device_node *parent = device->pdev->dev.of_node;
+	struct device_node *node, *child;
+
+	pwrscale->ctxt_aware_enable =
+		of_property_read_bool(parent, "qcom,enable-ca-jump");
+
+	if (!pwrscale->ctxt_aware_enable)
+		return;
+
+	pwrscale->ctxt_aware_busy_penalty = 12000;
+	of_property_read_u32(parent, "qcom,ca-busy-penalty",
+		&pwrscale->ctxt_aware_busy_penalty);
+
+
+	pwrscale->ctxt_aware_target_pwrlevel = 1;
+
+	node = of_find_node_by_name(parent, "qcom,gpu-pwrlevel-bins");
+	if (node == NULL) {
+		pwrscale_of_get_ca_target_pwrlevel(device, parent);
+		return;
+	}
+
+	for_each_child_of_node(node, child) {
+		u32 bin;
+
+		if (of_property_read_u32(child, "qcom,speed-bin", &bin))
+			continue;
+
+		if (bin == device->speed_bin) {
+			pwrscale_of_get_ca_target_pwrlevel(device, child);
+			of_node_put(child);
+			break;
+		}
+	}
+
+	of_node_put(node);
+}
+
+#if IS_ENABLED(CONFIG_DEVFREQ_GOV_QCOM_ADRENO_RO)
+#define KGSL_PASSIVE_GOVERNOR_NAME "msm-adreno-ro"
+
+static int kgsl_passive_devfreq_target(struct device *dev, unsigned long *freq, u32 flags)
+{
+	return 0;
+}
+
+static int kgsl_passive_devfreq_get_dev_status(struct device *dev,
+	struct devfreq_dev_status *stat)
+{
+	return 0;
+}
+
+/**
+ * kgsl_pwrscale_passive_init - Initialize the passive governor for gmu based DCVS targets
+ * @device: Pointer to KGSL device
+ * @pdev: Pointer to the GPU platform device
+ */
+static void kgsl_pwrscale_passive_init(struct kgsl_device *device, struct platform_device *pdev)
+{
+	struct kgsl_pwrscale *pwrscale = &device->pwrscale;
+	struct devfreq_dev_profile *profile = &pwrscale->gpu_profile.profile;
+	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
+	struct device *dev;
+	int ret, i;
+
+	device->gmu_core.gpu_pwrscale_enable = true;
+	profile->target = kgsl_passive_devfreq_target;
+	profile->get_dev_status = kgsl_passive_devfreq_get_dev_status;
+	profile->get_cur_freq = kgsl_devfreq_get_cur_freq;
+	profile->initial_freq = pwr->pwrlevels[pwr->default_pwrlevel].gpu_freq;
+	profile->max_state = pwr->num_pwrlevels;
+
+	for (i = 0; i < pwr->num_pwrlevels; i++)
+		pwrscale->freq_table[i] = pwr->pwrlevels[i].gpu_freq;
+	profile->freq_table = pwrscale->freq_table;
+
+	pwrscale->gpu_ro_df = devfreq_add_device(&pdev->dev, profile,
+		KGSL_PASSIVE_GOVERNOR_NAME, NULL);
+	if (IS_ERR_OR_NULL(pwrscale->gpu_ro_df)) {
+		ret = PTR_ERR(pwrscale->gpu_ro_df);
+		pwrscale->gpu_ro_df = NULL;
+		dev_err(device->dev, "Failed to add devfreq device for %s governor: %d\n",
+			KGSL_PASSIVE_GOVERNOR_NAME, ret);
+		return;
+	}
+
+	/* Passive governor does not need qos notifiers */
+	dev_pm_qos_remove_notifier(&device->pdev->dev, &pwrscale->gpu_ro_df->nb_max,
+			DEV_PM_QOS_MAX_FREQUENCY);
+	dev_pm_qos_remove_notifier(&device->pdev->dev, &pwrscale->gpu_ro_df->nb_min,
+			DEV_PM_QOS_MIN_FREQUENCY);
+
+	dev = &pwrscale->gpu_ro_df->dev;
+	sysfs_remove_groups(&dev->kobj, dev->class->dev_groups);
+}
+#else
+static void kgsl_pwrscale_passive_init(struct kgsl_device *device, struct platform_device *pdev)
+{
+}
+#endif
+
+static inline void kgsl_gpu_governor_cleanup(void)
+{
+	if (!strcmp(CONFIG_QCOM_ADRENO_DEFAULT_GOVERNOR, "msm-adreno-tz"))
+		return msm_adreno_tz_exit();
+}
+
+struct devfreq_simple_ondemand_data ondemand_data = {
+	.upthreshold = 50,
+	.downdifferential = 10,
+};
+
+/**
+ * kgsl_pwrscale_adreno_tz_init - Initialize the pwrscale subsystem for host based DCVS targets.
+ * @device: Pointer to KGSL device
+ * @pdev: Pointer to the GPU platform device
+ * @governor: Default devfreq governor to use for GPU frequency scaling
+ */
+static int kgsl_pwrscale_adreno_tz_init(struct kgsl_device *device, struct platform_device *pdev,
+		const char *governor)
+{
+	struct kgsl_pwrscale *pwrscale = &device->pwrscale;
+	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
+	struct msm_adreno_extended_profile *gpu_profile = &pwrscale->gpu_profile;
+	int ret;
+
+	/* Set default bus control to true on all targets */
+	pwr->bus_control = true;
+
+	gpu_profile->private_data = &adreno_tz_data;
+
+	pwrscale_of_ca_aware(device);
+
+	/*
+	 * Max_state is the number of valid power levels.
+	 * The valid power levels range from 0 - (max_state - 1)
+	 */
+	gpu_profile->profile.max_state = pwr->num_pwrlevels;
+	/* link storage array to the devfreq profile pointer */
+	gpu_profile->profile.freq_table = pwrscale->freq_table;
+
+	/* initialize msm-adreno-tz governor specific data here */
+	adreno_tz_data.disable_busy_time_burst =
+		of_property_read_bool(pdev->dev.of_node,
+		"qcom,disable-busy-time-burst");
+
+	if (pwrscale->ctxt_aware_enable) {
+		adreno_tz_data.ctxt_aware_enable = pwrscale->ctxt_aware_enable;
+		adreno_tz_data.bin.ctxt_aware_target_pwrlevel =
+			pwrscale->ctxt_aware_target_pwrlevel;
+		adreno_tz_data.bin.ctxt_aware_busy_penalty =
+			pwrscale->ctxt_aware_busy_penalty;
+	}
+
+	/*
+	 * If there is a separate GX power rail, allow
+	 * independent modification to its voltage through
+	 * the bus bandwidth vote.
+	 */
+	if (pwr->bus_control) {
+		adreno_tz_data.bus.num = pwr->ddr_table_count;
+		adreno_tz_data.bus.ib_kbps = pwr->ddr_table;
+		adreno_tz_data.bus.width = pwr->bus_width;
+
+		if (!kgsl_of_property_read_ddrtype(device->pdev->dev.of_node,
+			"qcom,bus-accesses", &adreno_tz_data.bus.max))
+			adreno_tz_data.bus.floating = false;
+	}
+
+	ret = msm_adreno_tz_init();
+	if (ret) {
+		dev_err(device->dev, "Failed to add adreno tz governor: %d\n", ret);
+		device->pwrscale.enabled = false;
+		return ret;
+	}
+
+	if (adreno_tz_data.bus.num)
+		pwrscale_busmon_create(device, pdev, pwrscale->freq_table);
+
+	return 0;
+}
+
+static int kgsl_pwrscale_governor_init(struct kgsl_device *device, struct platform_device *pdev,
+		const char *governor)
+{
+	struct kgsl_pwrscale *pwrscale = &device->pwrscale;
+	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
+	struct devfreq *devfreq = NULL;
+	struct msm_adreno_extended_profile *gpu_profile;
+	int i, ret;
+	void *data = NULL;
+
+	gpu_profile = &pwrscale->gpu_profile;
+	gpu_profile->profile.target = kgsl_devfreq_target;
+	gpu_profile->profile.get_dev_status = kgsl_devfreq_get_dev_status;
+	gpu_profile->profile.get_cur_freq = kgsl_devfreq_get_cur_freq;
+
+	gpu_profile->profile.initial_freq =
+		pwr->pwrlevels[pwr->default_pwrlevel].gpu_freq;
+
+	for (i = 0; i < pwr->num_pwrlevels; i++)
+		pwrscale->freq_table[i] = pwr->pwrlevels[i].gpu_freq;
+
+	if (!strcmp(governor, "simple_ondemand")) {
+		gpu_profile->profile.polling_ms = 50;
+		data = &ondemand_data;
+	} else if (!strcmp(governor, "msm-adreno-tz")) {
+		gpu_profile->profile.polling_ms = 10;
+		ret = kgsl_pwrscale_adreno_tz_init(device, pdev, governor);
+		if (ret)
+			return ret;
+
+		data = &adreno_tz_data;
+	} else {
+		dev_err(&pdev->dev, "Unknown GPU governor: %s\n", governor);
+		return -EINVAL;
+	}
+
+	pwrscale->devfreq_wq = create_freezable_workqueue("kgsl_devfreq_wq");
+	if (!pwrscale->devfreq_wq) {
+		kgsl_gpu_governor_cleanup();
+		device->pwrscale.enabled = false;
+		dev_err(device->dev, "Failed to allocate kgsl devfreq workqueue\n");
+		return -ENOMEM;
+	}
+
+	pwrscale->devfreq_notify_worker = kgsl_kthread_run_worker(0, "kgsl_devfreq_notifier");
+	if (IS_ERR(pwrscale->devfreq_notify_worker)) {
+		ret = PTR_ERR(pwrscale->devfreq_notify_worker);
+		destroy_workqueue(pwrscale->devfreq_wq);
+		kgsl_gpu_governor_cleanup();
+		pwrscale->devfreq_notify_worker = NULL;
+		dev_err(device->dev, "Failed to create devfreq notify worker ret: %d\n", ret);
+		return ret;
+	}
+
+	devfreq = devfreq_add_device(&pdev->dev, &gpu_profile->profile,
+			governor, data);
+	if (IS_ERR_OR_NULL(devfreq)) {
+		device->pwrscale.enabled = false;
+		destroy_workqueue(pwrscale->devfreq_wq);
+		kthread_destroy_worker(pwrscale->devfreq_notify_worker);
+		kgsl_gpu_governor_cleanup();
+		ret = IS_ERR(devfreq) ? PTR_ERR(devfreq) : -ENOMEM;
+		dev_err(device->dev, "Failed to add devfreq device for %s governor: %d\n",
+			governor, ret);
+		return ret;
+	}
+
+	devfreq_suspend_device(devfreq);
+	pwrscale->enabled = true;
+	pwrscale->devfreqptr = devfreq;
+
+	WARN_ON(sysfs_create_link(&device->dev->kobj,
+			&devfreq->dev.kobj, "devfreq"));
+
+	INIT_WORK(&pwrscale->devfreq_suspend_ws, do_devfreq_suspend);
+	INIT_WORK(&pwrscale->devfreq_resume_ws, do_devfreq_resume);
+	kthread_init_work(&pwrscale->devfreq_notify_work, do_devfreq_notify);
+	sched_set_fifo(pwrscale->devfreq_notify_worker->task);
+	pwrscale->next_governor_call = ktime_add_us(ktime_get(),
+			KGSL_GOVERNOR_CALL_INTERVAL);
+
+	return 0;
+}
+
+int kgsl_pwrscale_init(struct kgsl_device *device, struct platform_device *pdev)
+{
+	if (device->host_based_dcvs)
+		return kgsl_pwrscale_governor_init(device, pdev,
+				CONFIG_QCOM_ADRENO_DEFAULT_GOVERNOR);
+
+	kgsl_pwrscale_passive_init(device, pdev);
+	return 0;
+}
+
+static inline void kgsl_bus_governor_cleanup(void)
+{
+	if (!strcmp(CONFIG_QCOM_ADRENO_DEFAULT_GOVERNOR, "msm-adreno-tz"))
+		return devfreq_gpubw_exit();
+}
+
+/**
+ * kgsl_pwrscale_governor_close - Clean up  governor
+ * @device: Pointer to KGSL device
+ */
+static void kgsl_pwrscale_governor_close(struct kgsl_device *device)
+{
+	struct kgsl_pwrscale *pwrscale;
+	struct kgsl_pwrctrl *pwr;
+
+	pwr = &device->pwrctrl;
+	pwrscale = &device->pwrscale;
+
+	if (pwrscale->bus_devfreq) {
+		devfreq_remove_device(pwrscale->bus_devfreq);
+		pwrscale->bus_devfreq = NULL;
+		kgsl_bus_governor_cleanup();
+		dev_pm_opp_remove_all_dynamic(&pwrscale->busmondev);
+		device_unregister(&pwrscale->busmondev);
+		memset(&pwrscale->busmondev, 0, sizeof(pwrscale->busmondev));
+	}
+
+	if (!pwrscale->devfreqptr)
+		return;
+
+	if (!IS_ERR_OR_NULL(pwrscale->devfreq_notify_worker))
+		kthread_destroy_worker(pwrscale->devfreq_notify_worker);
+
+	if (pwrscale->devfreq_wq) {
+		flush_workqueue(pwrscale->devfreq_wq);
+		destroy_workqueue(pwrscale->devfreq_wq);
+		pwrscale->devfreq_wq = NULL;
+	}
+
+	devfreq_remove_device(device->pwrscale.devfreqptr);
+	device->pwrscale.devfreqptr = NULL;
+	kgsl_gpu_governor_cleanup();
+}
+
+#if IS_ENABLED(CONFIG_DEVFREQ_GOV_QCOM_ADRENO_RO)
+/**
+ * kgsl_pwrscale_passive_close - Clean up passive governor
+ * @device: Pointer to KGSL device
+ */
+static void kgsl_pwrscale_passive_close(struct kgsl_device *device)
+{
+	struct kgsl_pwrscale *pwrscale = &device->pwrscale;
+
+	if (!pwrscale->gpu_ro_df)
+		return;
+
+	devfreq_remove_device(pwrscale->gpu_ro_df);
+	pwrscale->gpu_ro_df = NULL;
+}
+#else
+static void kgsl_pwrscale_passive_close(struct kgsl_device *device)
+{
+}
+#endif
+
+void kgsl_pwrscale_close(struct kgsl_device *device)
+{
+	if (device->host_based_dcvs)
+		return kgsl_pwrscale_governor_close(device);
+
+	return kgsl_pwrscale_passive_close(device);
+}
+
+static void do_devfreq_suspend(struct work_struct *work)
+{
+	struct kgsl_pwrscale *pwrscale = container_of(work,
+			struct kgsl_pwrscale, devfreq_suspend_ws);
+
+	devfreq_suspend_device(pwrscale->devfreqptr);
+	if (pwrscale->bus_devfreq)
+		devfreq_suspend_device(pwrscale->bus_devfreq);
+}
+
+static void do_devfreq_resume(struct work_struct *work)
+{
+	struct kgsl_pwrscale *pwrscale = container_of(work,
+			struct kgsl_pwrscale, devfreq_resume_ws);
+
+	devfreq_resume_device(pwrscale->devfreqptr);
+	if (pwrscale->bus_devfreq)
+		devfreq_resume_device(pwrscale->bus_devfreq);
+}
+
+static void do_devfreq_notify(struct kthread_work *work)
+{
+	struct kgsl_pwrscale *pwrscale = container_of(work,
+			struct kgsl_pwrscale, devfreq_notify_work);
+
+	mutex_lock(&pwrscale->devfreqptr->lock);
+	update_devfreq(pwrscale->devfreqptr);
+	mutex_unlock(&pwrscale->devfreqptr->lock);
+
+	if (pwrscale->bus_devfreq) {
+		mutex_lock(&pwrscale->bus_devfreq->lock);
+		update_devfreq(pwrscale->bus_devfreq);
+		mutex_unlock(&pwrscale->bus_devfreq->lock);
+	}
+}

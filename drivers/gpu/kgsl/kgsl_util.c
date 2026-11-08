@@ -1,0 +1,506 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ */
+
+
+#include <linux/clk.h>
+#include <linux/clk-provider.h>
+#include <linux/delay.h>
+#include <linux/device.h>
+#include <linux/firmware.h>
+#include <linux/ktime.h>
+#include <linux/pm_domain.h>
+#include <linux/version.h>
+#if (KERNEL_VERSION(6, 3, 0) <= LINUX_VERSION_CODE)
+#include <linux/firmware/qcom/qcom_scm.h>
+#else
+#include <linux/qcom_scm.h>
+#endif
+#if IS_ENABLED(CONFIG_QCOM_SCM_ADDON)
+#include <linux/firmware/qcom/qcom_scm_addon.h>
+#endif
+#include <linux/regulator/consumer.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+
+#include "adreno.h"
+#include "kgsl_pool.h"
+#include "kgsl_util.h"
+
+int cmp_u32(const void *first, const void *second)
+{
+	u32 va = *(u32 *)first;
+	u32 vb = *(u32 *)second;
+
+	return (va > vb) - (va < vb);
+}
+
+bool kgsl_genpd_is_enabled(struct device *dev)
+{
+	struct generic_pm_domain *genpd;
+
+	if (IS_ERR_OR_NULL(dev) || IS_ERR_OR_NULL(dev->pm_domain))
+		return false;
+
+	genpd = pd_to_genpd(dev->pm_domain);
+	return (READ_ONCE(genpd->status) == GENPD_STATE_ON);
+}
+
+struct clk *kgsl_of_clk_by_name(struct clk_bulk_data *clks, int count,
+		const char *id)
+{
+	int i;
+
+	for (i = 0; clks && i < count; i++)
+		if (!strcmp(clks[i].id, id))
+			return clks[i].clk;
+
+	return NULL;
+}
+
+int kgsl_regulator_set_voltage(struct device *dev,
+		struct regulator *reg, u32 voltage)
+{
+	int ret;
+
+	if (IS_ERR_OR_NULL(reg))
+		return 0;
+
+	ret = regulator_set_voltage(reg, voltage, INT_MAX);
+	if (ret)
+		dev_err(dev, "Regulator set voltage:%d failed:%d\n", voltage, ret);
+
+	return ret;
+}
+
+int kgsl_clk_set_rate(struct clk_bulk_data *clks, int num_clks,
+		const char *id, unsigned long rate)
+{
+	struct clk *clk;
+
+	clk = kgsl_of_clk_by_name(clks, num_clks, id);
+
+	/*
+	 * If the downstream clock name isn't found, try removing "_clk" and retry
+	 * with corresponding standard clock name.
+	 */
+	if (!clk && (strlen(id) > 4) && (strcmp(id + strlen(id) - 4, "_clk") == 0)) {
+		char alt_id[32];
+		size_t new_len = strlen(id) - 4;
+
+		if (new_len < sizeof(alt_id)) {
+			memcpy(alt_id, id, new_len);
+			alt_id[new_len] = '\0';
+			clk = kgsl_of_clk_by_name(clks, num_clks, alt_id);
+		}
+	}
+
+	if (!clk)
+		return -ENODEV;
+
+	return clk_set_rate(clk, rate);
+}
+
+#if (KERNEL_VERSION(6, 1, 0) > LINUX_VERSION_CODE)
+static int _kgsl_scm_gpu_init_regs(u32 gpu_req)
+{
+	return -EOPNOTSUPP;
+}
+#elif (KERNEL_VERSION(6, 11, 0) <= LINUX_VERSION_CODE)
+static int _kgsl_scm_gpu_init_regs(u32 gpu_req)
+{
+	return qcom_scm_gpu_init_regs(gpu_req);
+}
+#elif (IS_ENABLED(CONFIG_QCOM_KGSL_UPSTREAM) && !IS_ENABLED(CONFIG_QCOM_SCM_ADDON))
+static int _kgsl_scm_gpu_init_regs(u32 gpu_req)
+{
+	return -EINVAL;
+}
+#else
+static int _kgsl_scm_gpu_init_regs(u32 gpu_req)
+{
+	return qcom_scm_kgsl_init_regs(gpu_req);
+}
+#endif
+
+int kgsl_scm_gpu_init_regs(struct device *dev, u32 gpu_req)
+{
+	int ret;
+
+	if (!gpu_req)
+		return -EOPNOTSUPP;
+
+	ret = _kgsl_scm_gpu_init_regs(gpu_req);
+	if (ret && (ret != -EOPNOTSUPP))
+		dev_err(dev, "Scm call for requests:0x%x failed with ret:: %d\n",
+									gpu_req, ret);
+
+	return ret;
+}
+
+int kgsl_hwlock(struct cpu_gpu_lock *lock)
+{
+	unsigned long timeout = jiffies + msecs_to_jiffies(1000);
+
+	/* Indicate that the CPU wants the lock */
+	lock->cpu_req = 1;
+
+	/* post the request */
+	wmb();
+
+	/* Wait for our turn */
+	lock->turn = 0;
+
+	/* Finish all memory transactions before moving on */
+	mb();
+
+	/*
+	 * Spin here while GPU ucode holds the lock, lock->gpu_req will
+	 * be set to 0 after GPU ucode releases the lock. Maximum wait time
+	 * is 1 second and this should be enough for GPU to release the lock.
+	 */
+	while (lock->gpu_req && lock->turn == 0) {
+		cpu_relax();
+		/* Get the latest updates from GPU */
+		rmb();
+
+		if (time_after(jiffies, timeout))
+			break;
+	}
+
+	if (lock->gpu_req && lock->turn == 0)
+		return -EBUSY;
+
+	return 0;
+}
+
+void kgsl_hwunlock(struct cpu_gpu_lock *lock)
+{
+	/* Make sure all writes are done before releasing the lock */
+	wmb();
+	lock->cpu_req = 0;
+}
+
+
+bool kgsl_is_compatible_node_available(const char *compat)
+{
+	struct device_node *node;
+	bool avail;
+
+	node = of_find_compatible_node(NULL, NULL, compat);
+
+	if (!node)
+		return false;
+
+	avail = of_device_is_available(node);
+	of_node_put(node);
+
+	return avail;
+}
+
+int kgsl_attach_iommu_group(struct device *dev, struct iommu_domain *domain,
+		struct iommu_group **group)
+{
+	struct iommu_group *grp = iommu_group_get(dev);
+	int ret;
+
+	if (!grp)
+		return -ENODEV;
+
+	ret = iommu_attach_group(domain, grp);
+	if (ret) {
+		iommu_group_put(grp);
+		return ret;
+	}
+
+	*group = grp;
+
+	return 0;
+}
+
+void kgsl_detach_iommu_group(struct iommu_domain *domain, struct iommu_group *group)
+{
+	iommu_detach_group(domain, group);
+	iommu_group_put(group);
+}
+
+#if IS_ENABLED(CONFIG_QCOM_KGSL_UPSTREAM)
+#include <linux/soc/qcom/smem.h>
+#include <linux/soc/qcom/socinfo.h>
+
+#if defined(SMEM_DDR_BUILD_ID)
+int kgsl_get_ddrtype(void)
+{
+	struct ddrinfo *ddr;
+
+	ddr = qcom_smem_get(QCOM_SMEM_HOST_ANY, SMEM_DDR_BUILD_ID, NULL);
+	if (IS_ERR(ddr)) {
+		pr_err("kgsl: Unable to get ddr type\n");
+		return PTR_ERR(ddr);
+	}
+
+	return ddr->device_type;
+}
+#else /* !defined(SMEM_DDR_BUILD_ID) */
+int kgsl_get_ddrtype(void)
+{
+	return -ENOENT;
+}
+#endif /* defined(SMEM_DDR_BUILD_ID) */
+#else /* !IS_ENABLED(CONFIG_QCOM_KGSL_UPSTREAM) */
+#include <soc/qcom/of_common.h>
+int kgsl_get_ddrtype(void)
+{
+	return of_fdt_get_ddrtype();
+}
+#endif /* IS_ENABLED(CONFIG_QCOM_KGSL_UPSTREAM) */
+
+#if IS_ENABLED(CONFIG_QCOM_VA_MINIDUMP)
+#include <soc/qcom/minidump.h>
+
+void kgsl_add_to_minidump(char *name, u64 virt_addr, u64 phy_addr, size_t size)
+{
+	struct md_region md_entry = {0};
+	int ret;
+
+	if (!msm_minidump_enabled())
+		return;
+
+	scnprintf(md_entry.name, sizeof(md_entry.name), name);
+	md_entry.virt_addr = virt_addr;
+	md_entry.phys_addr = phy_addr;
+	md_entry.size = size;
+	ret = msm_minidump_add_region(&md_entry);
+	if (ret < 0 && ret != -EEXIST)
+		pr_err("kgsl: Failed to register %s with minidump:%d\n", name, ret);
+
+}
+
+void kgsl_remove_from_minidump(char *name, u64 virt_addr, u64 phy_addr, size_t size)
+{
+	struct md_region md_entry = {0};
+	int ret;
+
+	if (!msm_minidump_enabled())
+		return;
+
+	scnprintf(md_entry.name, sizeof(md_entry.name), name);
+	md_entry.virt_addr = virt_addr;
+	md_entry.phys_addr = phy_addr;
+	md_entry.size = size;
+	ret = msm_minidump_remove_region(&md_entry);
+	if (ret < 0 && ret != -ENOENT)
+		pr_err("kgsl: Failed to remove %s from minidump\n", name);
+}
+
+int kgsl_add_va_to_minidump(struct device *dev, const char *name, void *ptr,
+		size_t size)
+{
+	struct va_md_entry entry = {0};
+	int ret;
+
+	scnprintf(entry.owner, sizeof(entry.owner), name);
+	entry.vaddr = (u64)(ptr);
+	entry.size = size;
+	ret = qcom_va_md_add_region(&entry);
+	if (ret < 0)
+		dev_err(dev, "Failed to register %s with va_minidump: %d\n", name,
+				ret);
+
+	return ret;
+}
+
+static bool include_global_in_minidump(struct kgsl_global_memdesc *md)
+{
+	static const char * const globals[] = {"ringbuffer", "memstore", "scratch",
+				"profile", "profile_desc", "alwayson"};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(globals); i++) {
+		if (!strcmp(md->name, globals[i]))
+			return true;
+	}
+
+	return false;
+}
+
+#ifdef CONFIG_QCOM_KGSL_USE_SHMEM
+static int kgsl_add_page_pools_to_va_minidump(struct kgsl_device *device)
+{
+	return 0;
+}
+#else
+static int kgsl_add_page_pools_to_va_minidump(struct kgsl_device *device)
+{
+	int i, ret;
+
+	for (i = 0; i < kgsl_num_pools; i++) {
+		ret = kgsl_add_va_to_minidump(device->dev, KGSL_PAGE_POOL_ENTRY,
+				(void *)&kgsl_pools[i], sizeof(kgsl_pools[i]));
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+#endif
+
+#ifdef CONFIG_SYNC_FILE
+static int kgsl_add_sync_timeline_info_to_va_minidump(struct kgsl_device *device)
+{
+	int ret, id;
+	struct kgsl_context *context;
+
+	idr_for_each_entry(&device->context_idr, context, id) {
+		char name[MAX_VA_MINIDUMP_STR_LEN];
+		struct kgsl_sync_fence *kfence, *next;
+		struct kgsl_sync_timeline *ktimeline = context->ktimeline;
+
+		snprintf(name, sizeof(name), KGSL_SYNC_TIMELINE_ENTRY "_ctxt:%d", context->id);
+		ret = kgsl_add_va_to_minidump(device->dev, name,
+				(void *)(ktimeline), sizeof(*ktimeline));
+		if (ret)
+			return ret;
+
+		list_for_each_entry_safe(kfence, next, &ktimeline->child_list_head, child_list) {
+			snprintf(name, sizeof(name), KGSL_SYNC_FENCE_ENTRY "_ctxt:%d",
+				context->id);
+			ret = kgsl_add_va_to_minidump(device->dev, name,
+					(void *)(kfence), sizeof(*kfence));
+			if (ret)
+				return ret;
+		}
+	}
+
+	return 0;
+}
+#else
+static int kgsl_add_sync_timeline_info_to_va_minidump(struct kgsl_device *device)
+{
+	return 0;
+}
+#endif
+
+static int kgsl_add_driver_data_to_va_minidump(struct kgsl_device *device)
+{
+	int ret;
+	char name[MAX_VA_MINIDUMP_STR_LEN];
+	struct kgsl_pagetable *pt;
+	struct adreno_context *ctxt;
+	struct kgsl_process_private *p;
+	struct kgsl_global_memdesc *md;
+	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
+
+	ret = kgsl_add_va_to_minidump(device->dev, KGSL_DRIVER,
+			(void *)(&kgsl_driver), sizeof(struct kgsl_driver));
+	if (ret)
+		return ret;
+
+	if (!ADRENO_FEATURE(adreno_dev, ADRENO_GMU_BASED_DCVS) &&
+		device->pwrscale.enabled) {
+		struct msm_busmon_extended_profile bus_profile = device->pwrscale.bus_profile;
+
+		ret = kgsl_add_va_to_minidump(device->dev, KGSL_ADRENO_TZ_DATA_ENTRY,
+				(void *)bus_profile.private_data,
+				sizeof(*bus_profile.private_data));
+		if (ret)
+			return ret;
+	}
+
+	ret = kgsl_add_page_pools_to_va_minidump(device);
+	if (ret)
+		return ret;
+
+	list_for_each_entry(ctxt, &adreno_dev->active_list, active_node) {
+		snprintf(name, sizeof(name), KGSL_ADRENO_CTX_ENTRY"_%d", ctxt->base.id);
+		ret = kgsl_add_va_to_minidump(device->dev, name,
+				(void *)(ctxt), sizeof(struct adreno_context));
+		if (ret)
+			break;
+	}
+
+	list_for_each_entry(p, &kgsl_driver.process_list, list) {
+		snprintf(name, sizeof(name), KGSL_PROC_PRIV_ENTRY "_%d", pid_nr(p->pid));
+		ret = kgsl_add_va_to_minidump(device->dev, name,
+				(void *)(p), sizeof(struct kgsl_process_private));
+		if (ret)
+			break;
+	}
+
+	list_for_each_entry(pt, &kgsl_driver.pagetable_list, list) {
+		snprintf(name, sizeof(name), KGSL_PGTABLE_ENTRY"_%d", pt->name);
+		ret = kgsl_add_va_to_minidump(device->dev, name,
+				(void *)(pt), sizeof(struct kgsl_pagetable));
+		if (ret)
+			break;
+	}
+
+	ret = kgsl_add_sync_timeline_info_to_va_minidump(device);
+	if (ret)
+		return ret;
+
+	/*
+	 * Global buffers for HWSCHED are dumped in target-specific code. Therefore,
+	 * only dump the required globals for SWSCHED here.
+	 */
+	if (!adreno_dev->hwsched_enabled) {
+		list_for_each_entry(md, &device->globals, node) {
+			if (include_global_in_minidump(md)) {
+				snprintf(name, sizeof(name), "kgsl_global_%s", md->name);
+				ret = kgsl_add_va_to_minidump(device->dev, name,
+						md->memdesc.hostptr, md->memdesc.size);
+				if (ret)
+					break;
+			}
+		}
+	}
+
+	return ret;
+}
+
+static int kgsl_va_minidump_callback(struct notifier_block *nb,
+		unsigned long action, void *unused)
+{
+	struct adreno_device *adreno_dev = ADRENO_DEVICE(kgsl_driver.devp[0]);
+	const struct adreno_gpudev *gpudev = ADRENO_GPU_DEVICE(adreno_dev);
+
+	if (kgsl_add_driver_data_to_va_minidump(kgsl_driver.devp[0]))
+		return NOTIFY_BAD;
+
+	if (gpudev->add_to_va_minidump(adreno_dev))
+		return NOTIFY_BAD;
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block kgsl_va_minidump_nb = {
+	.priority = INT_MAX,
+	.notifier_call = kgsl_va_minidump_callback,
+};
+
+void kgsl_qcom_va_md_register(struct kgsl_device *device)
+{
+	int ret;
+
+	if (!qcom_va_md_enabled())
+		return;
+
+	ret = qcom_va_md_register("KGSL", &kgsl_va_minidump_nb);
+	if (ret)
+		dev_err(device->dev, "Failed to register notifier with va_minidump: %d\n", ret);
+}
+
+void kgsl_qcom_va_md_unregister(struct kgsl_device *device)
+{
+	int ret;
+
+	if (!qcom_va_md_enabled())
+		return;
+
+	ret = qcom_va_md_unregister("KGSL", &kgsl_va_minidump_nb);
+	if (ret)
+		dev_err(device->dev, "Failed to unregister notifier with va_minidump: %d\n", ret);
+}
+#endif

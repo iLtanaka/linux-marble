@@ -11,3 +11,5 @@ config GPU_BUDDY_KUNIT_TEST
        default KUNIT_ALL_TESTS
        help
          KUnit tests for the GPU buddy allocator.
+
+source "drivers/gpu/kgsl/Kconfig"

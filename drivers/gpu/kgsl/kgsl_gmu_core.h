@@ -1,0 +1,1026 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ */
+#ifndef __KGSL_GMU_CORE_H
+#define __KGSL_GMU_CORE_H
+
+#include <linux/mailbox_client.h>
+#include <linux/rbtree.h>
+
+#include "kgsl_sharedmem.h"
+
+/* GMU_DEVICE - Given an KGSL device return the GMU specific struct */
+#define GMU_DEVICE_OPS(_a) ((_a)->gmu_core.dev_ops)
+
+/* GMU_PDEV - Given a KGSL device return the GMU platform device struct */
+#define GMU_PDEV(device) ((device)->gmu_core.pdev)
+
+/* GMU_PDEV_DEV - Given a KGSL device return pointer to struct dev for GMU platform device */
+#define GMU_PDEV_DEV(device) (&((GMU_PDEV(device))->dev))
+
+#define MAX_GX_LEVELS		32
+#define MAX_GX_LEVELS_LEGACY	16
+#define MAX_CX_LEVELS		16
+#define MAX_CX_LEVELS_LEGACY	4
+#define MAX_BW_LEVELS		16
+#define MAX_CNOC_LEVELS		2
+#define MAX_CNOC_CMDS		6
+#define MAX_BW_CMDS		8
+#define INVALID_DCVS_IDX	0xFF
+#define INVALID_AB_VALUE	0xFFFF
+#define MAX_AB_VALUE		(0xFFFF - 1)
+#define INVALID_BW_VOTE		(INVALID_DCVS_IDX | \
+					(FIELD_PREP(GENMASK(31, 16), INVALID_AB_VALUE)))
+#if MAX_CNOC_LEVELS > MAX_GX_LEVELS
+#error "CNOC levels cannot exceed GX levels"
+#endif
+
+enum gmu_common_capabilities {
+	FCC_VERSION_INFO = 0,
+};
+
+enum gmu_platform_capabilities {
+	FAC_TRACE_BUFFER = 0,
+	FAC_VRB_HW_FENCE_SHADOW_NUM_ENTRIES = 1,
+	FAC_VRB_CL_NO_FT_TIMEOUT = 2,
+	FAC_VRB_PREEMPT_COUNT = 3,
+	FAC_RBBM_INTERRUPTS_HANDLE_ALL = 4,
+	FAC_FORCE_RETIRE_COMMAND = 5,
+	FAC_SOFT_RESET = 6,
+};
+
+/*
+ * These are the different ways the GMU can boot. GMU_WARM_BOOT is waking up
+ * from slumber. GMU_COLD_BOOT is booting for the first time. GMU_RESET
+ * is a soft reset of the GMU.
+ */
+enum gmu_core_boot {
+	GMU_WARM_BOOT = 0,
+	GMU_COLD_BOOT = 1,
+	GMU_RESET = 2
+};
+
+/* Bits for the flags field in the gmu structure */
+enum gmu_core_flags {
+	GMU_BOOT_INIT_DONE = 0,
+	GMU_HFI_ON,
+	GMU_FAULT,
+	GMU_DCVS_REPLAY,
+	GMU_ENABLED,
+	GMU_RSCC_SLEEP_SEQ_DONE,
+	GMU_DISABLE_SLUMBER,
+	GMU_THERMAL_MITIGATION,
+	GMU_FORCE_COLDBOOT,
+	GMU_SOCCP_VOTE_ON,
+};
+
+/*
+ * OOB requests values. These range from 0 to 7 and then
+ * the BIT() offset into the actual value is calculated
+ * later based on the request. This keeps the math clean
+ * and easy to ensure not reaching over/under the range
+ * of 8 bits.
+ */
+enum oob_request {
+	oob_gpu = 0,
+	oob_perfcntr = 1,
+	oob_boot_slumber = 6, /* reserved special case */
+	oob_dcvs = 7, /* reserved special case */
+	oob_max,
+};
+
+#define GPU_HW_ACTIVE	0x00
+#define GPU_HW_IFPC	0x03
+#define GPU_HW_MINBW	0x06
+#define GPU_HW_SLUMBER	0x0f
+
+/*
+ * Wait time before trying to write the register again.
+ * Hopefully the GMU has finished waking up during this delay.
+ * This delay must be less than the IFPC main hysteresis or
+ * the GMU will start shutting down before we try again.
+ */
+#define GMU_CORE_WAKEUP_DELAY_US 10
+
+/* Max amount of tries to wake up the GMU. The short retry
+ * limit is half of the long retry limit. After the short
+ * number of retries, we print an informational message to say
+ * exiting IFPC is taking longer than expected. We continue
+ * to retry after this until the long retry limit.
+ */
+#define GMU_CORE_SHORT_WAKEUP_RETRY_LIMIT 100
+#define GMU_CORE_LONG_WAKEUP_RETRY_LIMIT 200
+
+#define FENCE_STATUS_WRITEDROPPED0_MASK 0x1
+#define FENCE_STATUS_WRITEDROPPED1_MASK 0x2
+
+#define HFI_VERSION(major, minor, step) \
+	(FIELD_PREP(GENMASK(31, 28), major) | \
+	 FIELD_PREP(GENMASK(27, 16), minor) | \
+	 FIELD_PREP(GENMASK(15, 0), step))
+
+#define GMU_VER_MAJOR(ver) (((ver) >> 28) & 0xF)
+#define GMU_VER_MINOR(ver) (((ver) >> 16) & 0xFFF)
+#define GMU_VER_STEP(ver) ((ver) & 0xFFFF)
+#define GMU_VERSION(major, minor, step) \
+	((((major) & 0xF) << 28) | (((minor) & 0xFFF) << 16) | ((step) & 0xFFFF))
+
+#define GMU_INT_WDOG_BITE		BIT(0)
+#define GMU_INT_RSCC_COMP		BIT(1)
+#define GMU_INT_FENCE_ERR		BIT(3)
+#define GMU_INT_DBD_WAKEUP		BIT(4)
+#define GMU_INT_HOST_AHB_BUS_ERR	BIT(5)
+#define GMU_AO_INT_MASK		\
+		(GMU_INT_WDOG_BITE |	\
+		GMU_INT_FENCE_ERR |	\
+		GMU_INT_HOST_AHB_BUS_ERR)
+
+/* Bitmask for GPU low power mode enabling and hysterisis*/
+#define SPTP_ENABLE_MASK (BIT(2) | BIT(0))
+#define IFPC_ENABLE_MASK (BIT(1) | BIT(0))
+
+/* Bitmask for RPMH capability enabling */
+#define RPMH_INTERFACE_ENABLE	BIT(0)
+#define LLC_VOTE_ENABLE			BIT(4)
+#define DDR_VOTE_ENABLE			BIT(8)
+#define MX_VOTE_ENABLE			BIT(9)
+#define CX_VOTE_ENABLE			BIT(10)
+#define GFX_VOTE_ENABLE			BIT(11)
+#define RPMH_ENABLE_MASK	(RPMH_INTERFACE_ENABLE	| \
+				LLC_VOTE_ENABLE		| \
+				DDR_VOTE_ENABLE		| \
+				MX_VOTE_ENABLE		| \
+				CX_VOTE_ENABLE		| \
+				GFX_VOTE_ENABLE)
+
+/* Constants for GMU OOBs */
+#define OOB_BOOT_OPTION         0
+#define OOB_SLUMBER_OPTION      1
+
+/* Gmu FW block header format */
+struct gmu_block_header {
+	u32 addr;
+	u32 size;
+	u32 type;
+	u32 value;
+};
+
+/* GMU Block types */
+#define GMU_BLK_TYPE_DATA 0
+#define GMU_BLK_TYPE_PREALLOC_REQ 1
+#define GMU_BLK_TYPE_CORE_VER 2
+#define GMU_BLK_TYPE_CORE_DEV_VER 3
+#define GMU_BLK_TYPE_PWR_VER 4
+#define GMU_BLK_TYPE_PWR_DEV_VER 5
+#define GMU_BLK_TYPE_HFI_VER 6
+#define GMU_BLK_TYPE_PREALLOC_PERSIST_REQ 7
+
+/* GMU Block IDs */
+#define GMU_BLOCK_ID_REGISTER        0
+#define GMU_BLOCK_ID_ALLOCATION      1
+#define GMU_BLOCK_ID_COMMON_CAPS     2
+#define GMU_BLOCK_ID_PLATFORM_CAPS   3
+
+/* GMU Field IDs */
+#define GMU_FIELD_DATA                 GMU_BLK_TYPE_DATA
+#define GMU_FIELD_PREALLOC             GMU_BLK_TYPE_PREALLOC_REQ
+#define GMU_FIELD_CORE_VERSION         GMU_BLK_TYPE_CORE_VER
+#define GMU_FIELD_CORE_DEV_VERSION     GMU_BLK_TYPE_CORE_DEV_VER
+#define GMU_FIELD_PWR_VERSION          GMU_BLK_TYPE_PWR_VER
+#define GMU_FIELD_PWR_DEV_VERSION      GMU_BLK_TYPE_PWR_DEV_VER
+#define GMU_FIELD_HFI_VERSION          GMU_BLK_TYPE_HFI_VER
+#define GMU_FIELD_PREALLOC_PERSISTENT  GMU_BLK_TYPE_PREALLOC_PERSIST_REQ
+
+/* For GMU Logs*/
+#define GMU_LOG_SIZE  SZ_64K
+
+/* For GMU virtual register bank */
+#define GMU_VRB_SIZE  SZ_4K
+
+/*
+ * GMU Virtual Register Definitions
+ * These values are dword offsets into the GMU Virtual Register Bank
+ */
+enum gmu_vrb_idx {
+	/* Number of dwords supported by VRB */
+	VRB_SIZE_IDX = 0,
+	/* Contains the address of warmboot scratch buffer */
+	VRB_WARMBOOT_SCRATCH_IDX = 1,
+	/* Contains the address of GMU trace buffer */
+	VRB_TRACE_BUFFER_ADDR_IDX = 2,
+	/* Contains the number of hw fence shadow table entries */
+	VRB_HW_FENCE_SHADOW_NUM_ENTRIES = 3,
+	/* Contains OpenCL no fault tolerance timeout in ms */
+	VRB_CL_NO_FT_TIMEOUT = 4,
+	/* Contains the total number of GPU preemptions */
+	VRB_PREEMPT_COUNT_TOTAL = 5,
+	/* Contains the number of L0 GPU preemptions */
+	VRB_PREEMPT_COUNT_L0 = 6,
+	/* Contains the number of L1A GPU preemptions */
+	VRB_PREEMPT_COUNT_L1A = 7,
+	/* Contains the number of L1B GPU preemptions */
+	VRB_PREEMPT_COUNT_L1B = 8,
+	/* Contains the GMU VA for power limits trace buffer */
+	VRB_PWR_LIMITS_TRACE_BUF = 9,
+	/* Contains the total size of context record in KB */
+	VRB_CTXRECORD_TOTAL_SZ = 10,
+	/* Contains the size of AQE context record in KB */
+	VRB_CTXRECORD_AQE_SZ = 11,
+	/* Contains the size of GMEM inside context record in KB */
+	VRB_CTXRECORD_GMEM_SZ = 12,
+	/* Contains whether to enable fault on DBGC interrupts */
+	VRB_DBGC_FAULT_ENABLE = 17,
+};
+
+/* For GMU Trace */
+#define GMU_TRACE_SIZE  SZ_16K
+
+/* Trace header defines */
+/* Logtype to decode the trace pkt data */
+#define TRACE_LOGTYPE_HWSCHED	1
+/* Trace buffer threshold for GMU to send F2H message */
+#define TRACE_BUFFER_THRESHOLD	80
+/*
+ * GMU Trace timer value to check trace packet consumption. GMU timer handler tracks the
+ * readindex, If it's not moved since last timer fired, GMU will send the f2h message to
+ * drain trace packets. GMU Trace Timer will be restarted if the readindex is moving.
+ */
+#define TRACE_TIMEOUT_MSEC	5
+
+/* Trace metadata defines */
+/* Trace drop mode hint for GMU to drop trace packets when trace buffer is full */
+#define TRACE_MODE_DROP	1
+/* Trace buffer header version */
+#define TRACE_HEADER_VERSION_1	1
+
+/* Trace packet defines */
+#define TRACE_PKT_VALID	1
+#define TRACE_PKT_SEQ_MASK	GENMASK(15, 0)
+#define TRACE_PKT_SZ_MASK	GENMASK(27, 16)
+#define TRACE_PKT_SZ_SHIFT	16
+#define TRACE_PKT_VALID_MASK	GENMASK(31, 31)
+#define TRACE_PKT_SKIP_MASK	GENMASK(30, 30)
+#define TRACE_PKT_VALID_SHIFT	31
+#define TRACE_PKT_SKIP_SHIFT	30
+
+#define TRACE_PKT_GET_SEQNUM(hdr) ((hdr) & TRACE_PKT_SEQ_MASK)
+#define TRACE_PKT_GET_SIZE(hdr) (((hdr) & TRACE_PKT_SZ_MASK) >> TRACE_PKT_SZ_SHIFT)
+#define TRACE_PKT_GET_VALID_FIELD(hdr) (((hdr) & TRACE_PKT_VALID_MASK) >> TRACE_PKT_VALID_SHIFT)
+#define TRACE_PKT_GET_SKIP_FIELD(hdr) (((hdr) & TRACE_PKT_SKIP_MASK) >> TRACE_PKT_SKIP_SHIFT)
+
+/*
+ * Trace buffer header definition
+ * Trace buffer header fields initialized/updated by KGSL and GMU
+ * GMU input: Following header fields are initialized by KGSL
+ *           - @metadata, @threshold, @size, @cookie, @timeout, @log_type
+ *           - @readIndex updated by kgsl when traces messages are consumed.
+ * GMU output: Following header fields are initialized by GMU only
+ *           - @magic, @payload_offset, @payload_size
+ *           - @write_index updated by GMU upon filling the trace messages
+ */
+struct gmu_trace_header {
+	/** @magic: Initialized by GMU to check header is valid or not */
+	u32 magic;
+	/**
+	 * @metadata: Trace buffer metadata.Bit(31) Trace Mode to log tracepoints
+	 * messages, Bits [3:0] Version for header format changes.
+	 */
+	u32 metadata;
+	/**
+	 * @threshold: % at which GMU to send f2h message to wakeup KMD to consume
+	 * tracepoints data. Set it to zero to disable thresholding. Threshold is %
+	 * of buffer full condition not the trace packet count. If GMU is continuously
+	 * writing to trace buffer makes it buffer full condition when KMD is not
+	 * consuming it. So GMU check the how much trace buffer % space is full based
+	 * on the threshold % value.If the trace packets are filling over % buffer full
+	 * condition GMU will send the f2h message for KMD to drain the trace messages.
+	 */
+	u32 threshold;
+	/** @size: trace buffer allocation size in bytes */
+	u32 size;
+	/** @read_index: trace buffer read index in dwords */
+	u32 read_index;
+	/** @write_index: trace buffer write index in dwords */
+	u32 write_index;
+	/** @payload_offset: trace buffer payload dword offset */
+	u32 payload_offset;
+	/** @payload_size: trace buffer payload size in dword */
+	u32 payload_size;
+	/** cookie: cookie data sent through F2H_PROCESS_MESSAGE */
+	u64 cookie;
+	/**
+	 * timeout: GMU Trace Timer value in msec - zero to disable trace timer else
+	 * value for GMU trace timerhandler to send HFI msg.
+	 */
+	u32 timeout;
+	/** @log_type: To decode the trace buffer data */
+	u32 log_type;
+} __packed;
+
+/* Trace ID definition */
+enum gmu_trace_id {
+	GMU_TRACE_PREEMPT_TRIGGER = 1,
+	GMU_TRACE_PREEMPT_DONE = 2,
+	GMU_TRACE_EXTERNAL_HW_FENCE_SIGNAL = 3,
+	GMU_TRACE_SYNCOBJ_RETIRE = 4,
+	GMU_TRACE_DCVS_PWRLVL = 5,
+	GMU_TRACE_DCVS_BUSLVL = 6,
+	GMU_TRACE_DCVS_PWRSTATS = 7,
+	GMU_TRACE_PWR_CONSTRAINT = 8,
+	GMU_TRACE_DCVS_PROFILE = 9,
+	GMU_TRACE_MAX,
+};
+
+struct trace_preempt_trigger {
+	u32 cur_rb;
+	u32 next_rb;
+	u32 ctx_switch_cntl;
+} __packed;
+
+struct trace_preempt_done {
+	u32 prev_rb;
+	u32 next_rb;
+	u32 ctx_switch_cntl;
+} __packed;
+
+struct trace_ext_hw_fence_signal {
+	u64 context;
+	u64 seq_no;
+	u32 flags;
+} __packed;
+
+struct trace_syncobj_retire {
+	u32 gmu_ctxt_id;
+	u32 timestamp;
+} __packed;
+
+#define TRACE_FLAG_BIT_DCVS_VOTE	0
+#define TRACE_FLAG_BIT_STRICT_FRAME	1
+#define TRACE_FLAG_BIT_NON_LINEAR_UP	2
+#define TRACE_FLAG_BIT_NON_LINEAR_DOWN	3
+
+struct trace_dcvs_pwrlvl {
+	u32 new_pwrlvl;
+	u32 prev_pwrlvl;
+	u32 flag;
+	u16 penalty_up;
+	u16 penalty_down;
+	u16 first_step_down_count;
+	u16 subsequent_step_down_count;
+	u16 min_freq;
+	u16 max_freq;
+	u16 num_samples_up;
+	u16 num_samples_down;
+	u16 target_fps;
+	u16 mod_percent;
+	u16 avg_busy;
+	u16 padding;
+} __packed;
+
+struct trace_dcvs_buslvl {
+	u32 gpu_pwrlvl;
+	u32 buslvl;
+	u32 cur_abmbps;
+} __packed;
+
+struct trace_dcvs_pwrstats {
+	u64 total_time;
+	u64 gpu_time;
+	u64 ram_wait;
+	u64 ram_time;
+	u16 aggr_max_pwrlevel;
+	u16 padding;
+} __packed;
+
+struct trace_pwr_constraint {
+	u32 type;
+	u32 value;
+	u32 status;
+} __packed;
+
+struct trace_dcvs_profile {
+	u32 action;
+	u32 profile;
+	struct kgsl_dcvs_attrs attrs;
+} __packed;
+
+/**
+ * struct kgsl_gmu_trace  - wrapper for gmu trace memory object
+ */
+struct kgsl_gmu_trace {
+	 /** @md: gmu trace memory descriptor */
+	struct kgsl_memdesc *md;
+	/* @seq_num: GMU trace packet sequence number to detect drop packet count */
+	u16 seq_num;
+	/* @reset_hdr: To reset trace buffer header incase of invalid packet */
+	bool reset_hdr;
+};
+
+/* GMU memdesc entries */
+#define GMU_KERNEL_ENTRIES		32
+
+enum gmu_mem_type {
+	GMU_ITCM = 0,
+	GMU_ICACHE,
+	GMU_CACHE = GMU_ICACHE,
+	GMU_DTCM,
+	GMU_DCACHE,
+	GMU_NONCACHED_KERNEL, /* GMU VBIF3 uncached VA range: 0x60000000 - 0x7fffffff */
+	GMU_NONCACHED_KERNEL_EXTENDED, /* GMU VBIF3 uncached VA range: 0xc0000000 - 0xdfffffff */
+	GMU_NONCACHED_USER,
+	GMU_MEM_TYPE_MAX,
+};
+
+/**
+ * struct gmu_memdesc - Gmu shared memory object descriptor
+ * @hostptr: Kernel virtual address
+ * @gmuaddr: GPU virtual address
+ * @physaddr: Physical address of the memory object
+ * @size: Size of the memory object
+ */
+struct gmu_memdesc {
+	void *hostptr;
+	u32 gmuaddr;
+	phys_addr_t physaddr;
+	u32 size;
+};
+
+struct kgsl_mailbox {
+	struct mbox_client client;
+	struct mbox_chan *channel;
+};
+
+struct icc_path;
+
+struct gmu_vma_node {
+	struct rb_node node;
+	u32 va;
+	u32 size;
+};
+
+struct gmu_vma_entry {
+	/** @start: Starting virtual address of the vma */
+	u32 start;
+	/** @size: Size of this vma */
+	u32 size;
+	/** @next_va: Next available virtual address in this vma */
+	u32 next_va;
+	/** @lock: Spinlock for synchronization */
+	spinlock_t lock;
+	/** @vma_root: RB tree root that keeps track of dynamic allocations */
+	struct rb_root vma_root;
+};
+
+enum {
+	GMU_PRIV_FIRST_BOOT_DONE = 0,
+	GMU_PRIV_GPU_STARTED,
+	GMU_PRIV_HFI_STARTED,
+	GMU_PRIV_RSCC_SLEEP_DONE,
+	GMU_PRIV_PM_SUSPEND,
+	GMU_PRIV_PDC_RSC_LOADED,
+	/* Indicates if GMU INIT HFI messages are recorded successfully */
+	GMU_PRIV_WARMBOOT_GMU_INIT_DONE,
+	/* Indicates if GPU BOOT HFI messages are recorded successfully */
+	GMU_PRIV_WARMBOOT_GPU_BOOT_DONE,
+};
+
+struct device_node;
+struct kgsl_device;
+struct kgsl_snapshot;
+
+#define GMU_FAULT_PANIC_NONE 0
+enum gmu_fault_panic_policy {
+	GMU_FAULT_DEVICE_START = 1,
+	GMU_FAULT_HFI_INIT,
+	GMU_FAULT_OOB_SET,
+	GMU_FAULT_HFI_RECIVE_ACK,
+	GMU_FAULT_SEND_CMD_WAIT_INLINE,
+	GMU_FAULT_HFI_SEND_GENERIC_REQ,
+	GMU_FAULT_F2H_MSG_ERR,
+	GMU_FAULT_H2F_MSG_START,
+	GMU_FAULT_WAIT_ACK_COMPLETION,
+	GMU_FAULT_HFI_ACK,
+	GMU_FAULT_CTX_UNREGISTER,
+	GMU_FAULT_WAIT_FOR_LOWEST_IDLE,
+	GMU_FAULT_WAIT_FOR_IDLE,
+	GMU_FAULT_HW_FENCE,
+	GMU_FAULT_WAIT_FOR_CX,
+	GMU_FAULT_CX_WAIT_TIMEOUT,
+	GMU_FAULT_CM3,
+	GMU_FAULT_MAX,
+};
+
+#define KGSL_GMU_CORE_FORCE_PANIC(gf_panic, pdev, ticks, policy) do { \
+		if (gf_panic & BIT(policy)) { \
+			dev_err(&pdev->dev, \
+				"GMU always on ticks: %llx gf_policy: 0x%x gf_trigger: 0x%lx\n", \
+				ticks, gf_panic, BIT(policy));\
+			BUG();\
+		} \
+	} while (0)
+
+struct gmu_dev_ops {
+	int (*oob_set)(struct kgsl_device *device, enum oob_request req);
+	void (*oob_clear)(struct kgsl_device *device, enum oob_request req);
+	int (*ifpc_store)(struct kgsl_device *device, unsigned int val);
+	unsigned int (*ifpc_isenabled)(struct kgsl_device *device);
+	void (*cooperative_reset)(struct kgsl_device *device);
+	int (*wait_for_active_transition)(struct kgsl_device *device);
+	bool (*scales_bandwidth)(struct kgsl_device *device);
+	int (*acd_set)(struct kgsl_device *device, bool val);
+	int (*bcl_sid_set)(struct kgsl_device *device, u32 sid_id, u64 sid_val);
+	u64 (*bcl_sid_get)(struct kgsl_device *device, u32 sid_id);
+	void (*force_first_boot)(struct kgsl_device *device);
+	void (*send_nmi)(struct kgsl_device *device, bool force,
+		enum gmu_fault_panic_policy gf_policy);
+	void (*minbw_idle_level_set)(struct kgsl_device *device, u32 val);
+};
+
+struct firmware_capabilities {
+	u32 length;
+	u8  *data;
+};
+
+/**
+ * struct gmu_core_device - GMU Core device structure
+ * @ptr: Pointer to GMU device structure
+ * @dev_ops: Pointer to gmu device operations
+ * @flags: GMU flags
+ */
+struct gmu_core_device {
+	void *ptr;
+	const struct gmu_dev_ops *dev_ops;
+	unsigned long flags;
+	/** @gf_panic: GMU fault panic policy */
+	enum gmu_fault_panic_policy gf_panic;
+	/** @pdev: platform device for the gmu */
+	struct platform_device *pdev;
+	/** @domain: IOMMU domain for the gmu context */
+	struct iommu_domain *domain;
+	/** @group: IOMMU group for the gmu context */
+	struct iommu_group *group;
+	/** @gmu_globals: Array to store gmu global buffers */
+	struct kgsl_memdesc gmu_globals[GMU_KERNEL_ENTRIES];
+	/** @global_entries: To keep track of number of gmu buffers */
+	u32 global_entries;
+	/** @vma: VMA entry for GMU */
+	struct gmu_vma_entry *vma;
+	/** @num_vmas: Number of entries in the @vma array */
+	u32 num_vmas;
+	/** @common_caps: GMU firmware common capabilities */
+	struct firmware_capabilities common_caps;
+	/** @platform_caps: GMU firmware platform capabilities */
+	struct firmware_capabilities platform_caps;
+	/* @ver: GMU Version information */
+	struct {
+		u32 core;
+		u32 core_dev;
+		u32 pwr;
+		u32 pwr_dev;
+		u32 hfi;
+	} ver;
+	/** @warmboot_enabled: True if warmboot is enabled */
+	bool warmboot_enabled;
+	/** @rdpm_cx_virt: Pointer where the RDPM CX block is mapped */
+	void __iomem *rdpm_cx_virt;
+	/** @rdpm_mx_virt: Pointer where the RDPM MX block is mapped */
+	void __iomem *rdpm_mx_virt;
+	/** @rdpm_cx_offset: Offset of RDPM CX register */
+	u32 rdpm_cx_offset;
+	/** @rdpm_mx_offset: Offset of RDPM MX register */
+	u32 rdpm_mx_offset;
+	/** @clks: GPU subsystem clocks required for GMU functionality */
+	struct clk_bulk_data *clks;
+	/** @num_clks: Number of entries in the @clks array */
+	int num_clks;
+	/** @freqs: Array of GMU frequencies */
+	u32 freqs[MAX_CX_LEVELS];
+	/** @num_freqs: Number of entries in the @freqs array */
+	int num_freqs;
+	/** @vlvls: Array of GMU voltage levels */
+	u32 vlvls[MAX_CX_LEVELS];
+	/*
+	 * @perf_ddr_bw: The lowest ddr bandwidth that puts CX at a corner at
+	 * which GMU can run at higher frequency.
+	 */
+	u32 perf_ddr_bw[MAX_CX_LEVELS];
+	/** @cur_level: Tracks current frequency level for GMU */
+	u32 cur_level;
+	/** @hub_freqs: Array of GMU hub frequencies */
+	u32 hub_freqs[MAX_CX_LEVELS];
+	/** @hub_vlvls: Array of GMU hub voltage levels */
+	u32 hub_vlvls[MAX_CX_LEVELS];
+	/** @num_hub_freqs: Number of entries in the @hub_freqs array */
+	int num_hub_freqs;
+	/** @cur_hub_level: Tracks current frequency level for hub clock */
+	u32 cur_hub_level;
+	/** @gpu_pwrscale_enable: Flag to toggle GMU based DCVS pwrscale */
+	bool gpu_pwrscale_enable;
+	/** @vrb: GMU virtual register bank memory */
+	struct kgsl_memdesc *vrb;
+	/** @trace: gmu trace container */
+	struct kgsl_gmu_trace trace;
+};
+
+extern struct platform_driver a6xx_gmu_driver;
+extern struct platform_driver a6xx_rgmu_driver;
+extern struct platform_driver gen7_gmu_driver;
+extern struct platform_driver gen8_gmu_driver;
+
+/* GMU core functions */
+
+void __init gmu_core_register(void);
+void gmu_core_unregister(void);
+
+bool gmu_core_gpmu_isenabled(struct kgsl_device *device);
+bool gmu_core_scales_bandwidth(struct kgsl_device *device);
+bool gmu_core_isenabled(struct kgsl_device *device);
+int gmu_core_dev_acd_set(struct kgsl_device *device, bool val);
+void gmu_core_regread(struct kgsl_device *device, unsigned int offsetwords,
+		unsigned int *value);
+void gmu_core_regwrite(struct kgsl_device *device, unsigned int offsetwords,
+		unsigned int value);
+
+/**
+ * gmu_core_blkwrite - Do a bulk I/O write to GMU
+ * @device: Pointer to the kgsl device
+ * @offsetwords: Destination dword offset
+ * @buffer: Pointer to the source buffer
+ * @size: Number of bytes to copy
+ *
+ * Write a series of GMU registers quickly without bothering to spend time
+ * logging the register writes. The logging of these writes causes extra
+ * delays that could allow IRQs arrive and be serviced before finishing
+ * all the writes.
+ */
+void gmu_core_blkwrite(struct kgsl_device *device, unsigned int offsetwords,
+		const void *buffer, size_t size);
+void gmu_core_regrmw(struct kgsl_device *device, unsigned int offsetwords,
+		unsigned int mask, unsigned int bits);
+int gmu_core_dev_oob_set(struct kgsl_device *device, enum oob_request req);
+void gmu_core_dev_oob_clear(struct kgsl_device *device, enum oob_request req);
+int gmu_core_dev_ifpc_isenabled(struct kgsl_device *device);
+int gmu_core_dev_ifpc_store(struct kgsl_device *device, unsigned int val);
+int gmu_core_dev_wait_for_active_transition(struct kgsl_device *device);
+void gmu_core_dev_cooperative_reset(struct kgsl_device *device);
+
+/**
+ * gmu_core_fault_snapshot - Set gmu fault and trigger snapshot
+ * @device: Pointer to the kgsl device
+ * @gf_policy: GMU fault panic setting policy
+ *
+ * Set the gmu fault and take snapshot when we hit a gmu fault
+ */
+void gmu_core_fault_snapshot(struct kgsl_device *device,
+			enum gmu_fault_panic_policy gf_policy);
+
+/**
+ * gmu_core_timed_poll_check() - polling *gmu* register at given offset until
+ * its value changed to match expected value. The function times
+ * out and returns after given duration if register is not updated
+ * as expected.
+ *
+ * @device: Pointer to KGSL device
+ * @offset: Register offset in dwords
+ * @expected_ret: expected register value that stops polling
+ * @timeout_ms: time in milliseconds to poll the register
+ * @mask: bitmask to filter register value to match expected_ret
+ */
+int gmu_core_timed_poll_check(struct kgsl_device *device,
+		unsigned int offset, unsigned int expected_ret,
+		unsigned int timeout_ms, unsigned int mask);
+
+struct kgsl_memdesc;
+struct iommu_domain;
+struct hfi_mem_alloc_entry;
+
+struct gmu_mem_type_desc {
+	/** @memdesc: Pointer to the memory descriptor */
+	struct kgsl_memdesc *memdesc;
+	/** @type: Type of the memory descriptor */
+	u32 type;
+};
+
+/**
+ * gmu_core_map_memdesc - Map the memdesc into the GMU IOMMU domain
+ * @domain: Domain to map the memory into
+ * @memdesc: Memory descriptor to map
+ * @gmuaddr: Virtual GMU address to map the memory into
+ * @attrs: Attributes for the mapping
+ *
+ * Return: 0 on success or -ENOMEM on failure
+ */
+int gmu_core_map_memdesc(struct iommu_domain *domain, struct kgsl_memdesc *memdesc,
+		u64 gmuaddr, int attrs);
+
+/**
+ * gmu_core_map_gmu - Map a kgsl memdesc to GMU
+ * @device: Pointer to kgsl device
+ * @md: Pointer to the kgsl memdesc
+ * @addr: Address where to map this memdesc
+ * @vma_id: VMA id to which this memdesc needs to be mapped
+ * @attrs: mapping attributes
+ * @align: Alignment request for this memdesc
+
+ * Return: Zero on success or negative error on failure.
+ */
+int gmu_core_map_gmu(struct kgsl_device *device, struct kgsl_memdesc *md,
+		u32 addr, u32 vma_id, int attrs, u32 align);
+
+/**
+ * gmu_core_find_memdesc - Find the GMU memory descriptor for a given address and size
+ * @device: Pointer to KGSL device
+ * @addr: Address of the memory region
+ * @size: Size of the memory region
+ *
+ * Return: Pointer to the matching kgsl_memdesc structure if found, NULL otherwise.
+ */
+struct kgsl_memdesc *gmu_core_find_memdesc(struct kgsl_device *device, u32 addr, u32 size);
+
+/**
+ * gmu_core_find_vma_block - Find the VMA block for a given address and size
+ * @device: Pointer to KGSL device
+ * @addr: Address of the memory region
+ * @size: Size of the memory region
+ *
+ * Return: The index of the matching VMA entry if found, -ENOENT otherwise.
+ */
+int gmu_core_find_vma_block(struct kgsl_device *device, u32 addr, u32 size);
+
+/**
+ * gmu_core_free_globals - Free the GMU global memory descriptors
+ * @device: Pointer to KGSL device
+ */
+void gmu_core_free_globals(struct kgsl_device *device);
+
+/**
+ * gmu_core_get_attrs - Get the IOMMU attributes based on flags
+ * @flags: The memory flags indicating the attributes
+ *
+ * Return: IOMMU attributes.
+ */
+int gmu_core_get_attrs(u32 flags);
+
+/**
+ * gmu_core_import_buffer - Import a gmu buffer
+ * @device: Pointer to KGSL device
+ * @entry: GMU memory entry
+ * This function imports and maps a buffer to a gmu vma
+ *
+ * Return: 0 on success or error code on failure
+ */
+int gmu_core_import_buffer(struct kgsl_device *device, struct hfi_mem_alloc_entry *entry);
+
+/**
+ * gmu_core_reserve_kernel_block - Allocate a gmu buffer
+ * @device: Pointer to KGSL device
+ * @addr: Desired gmu virtual address
+ * @size: Size of the buffer in bytes
+ * @vma_id: Target gmu vma where this buffer should be mapped
+ * @align: Alignment as a power of two(2^n) bytes for the GMU VA
+ *
+ * This function allocates a buffer and maps it in the desired gmu vma
+ *
+ * Return: Pointer to the memory descriptor or error pointer on failure
+ */
+struct kgsl_memdesc *gmu_core_reserve_kernel_block(struct kgsl_device *device,
+	u32 addr, u32 size, u32 vma_id, u32 align);
+
+/**
+ * gmu_core_reserve_kernel_block_fixed - Maps phyical resource address to gmu
+ * @device: Pointer to KGSL device
+ * @addr: Desired gmu virtual address
+ * @size: Size of the buffer in bytes
+ * @vma_id: Target gmu vma where this buffer should be mapped
+ * @resource: Name of the resource to get the size and address to allocate
+ * @attrs: Attributes for the mapping
+ * @align: Alignment as a power of two(2^n) bytes for the GMU VA
+ *
+ * This function maps the physcial resource address to desired gmu vma
+ *
+ * Return: Pointer to the memory descriptor or error pointer on failure
+ */
+struct kgsl_memdesc *gmu_core_reserve_kernel_block_fixed(struct kgsl_device *device,
+	u32 addr, u32 size, u32 vma_id, const char *resource, int attrs, u32 align);
+
+/**
+ * gmu_core_alloc_kernel_block - Allocate a gmu buffer
+ * @device: Pointer to KGSL device
+ * @md: Pointer to the memdesc
+ * @size: Size of the buffer in bytes
+ * @vma_id: Target gmu vma where this buffer should be mapped
+ * @attrs: Attributes for the mapping
+ *
+ * This function allocates a buffer and maps it in the desired gmu vma
+ *
+ * Return: 0 on success or error code on failure
+ */
+int gmu_core_alloc_kernel_block(struct kgsl_device *device,
+	struct kgsl_memdesc *md, u32 size, u32 vma_id, int attrs);
+
+/**
+ * gmu_core_free_block - Free a gmu buffer
+ * @device: Pointer to KGSL device
+ * @md: Pointer to the memdesc that is to be freed
+ */
+void gmu_core_free_block(struct kgsl_device *device, struct kgsl_memdesc *md);
+
+/**
+ * gmu_core_process_prealloc - Process preallocate GMU blocks
+ * @device: Pointer to the KGSL device structure
+ * @blk: Pointer to the GMU block header structure
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+int gmu_core_process_prealloc(struct kgsl_device *device, struct gmu_block_header *blk);
+
+/**
+ * gmu_core_iommu_init - Set up GMU IOMMU and shared memory with GMU
+ * @device: Pointer to KGSL device
+ *
+ * Return: 0 on success or error value on failure
+ */
+int gmu_core_iommu_init(struct kgsl_device *device);
+
+void gmu_core_dev_force_first_boot(struct kgsl_device *device);
+
+/**
+ * gmu_core_set_vrb_register - set vrb register value at specified index
+ * @vrb: GMU virtual register bank memory
+ * @index: vrb index to write the value
+ * @val: value to be writen into vrb
+ *
+ * Return: Negative error on failure and zero on success.
+ */
+int gmu_core_set_vrb_register(struct kgsl_memdesc *vrb, u32 index, u32 val);
+
+/**
+ * gmu_core_get_vrb_register - get vrb register value at specified index
+ * @vrb: GMU virtual register bank memory
+ * @index: vrb index to write the value
+ * @val: Pointer to update the data after reading from vrb
+ *
+ * Return: Negative error on failure and zero on success.
+ */
+int gmu_core_get_vrb_register(struct kgsl_memdesc *vrb, u32 index, u32 *val);
+
+/**
+ * gmu_core_process_trace_data - Process gmu trace buffer data writes to default linux trace buffer
+ * @device: Pointer to KGSL device
+ * @dev: GMU device instance
+ * @trace: GMU trace memory pointer
+ */
+void gmu_core_process_trace_data(struct kgsl_device *device,
+	struct device *dev, struct kgsl_gmu_trace *trace);
+
+/**
+ * gmu_core_is_trace_empty - Check for trace buffer empty/full status
+ * @hdr: Pointer to gmu trace header
+ *
+ * Return: true if readidex equl to writeindex else false
+ */
+bool gmu_core_is_trace_empty(struct gmu_trace_header *hdr);
+
+/**
+ * gmu_core_trace_header_init - Initialize the GMU trace buffer header
+ * @trace: Pointer to kgsl gmu trace
+ */
+void gmu_core_trace_header_init(struct kgsl_gmu_trace *trace);
+
+/**
+ * gmu_core_reset_trace_header - Reset GMU trace buffer header
+ * @trace: Pointer to kgsl gmu trace
+ */
+void gmu_core_reset_trace_header(struct kgsl_gmu_trace *trace);
+
+/**
+ * gmu_core_soccp_vote - vote for soccp power
+ * @device: Pointer to kgsl device
+ * @pwr_on: Boolean to indicate vote on or off
+
+ * Return: Negative error on failure and zero on success.
+ */
+int gmu_core_soccp_vote(struct kgsl_device *device, bool pwr_on);
+
+/**
+ * gmu_core_capabilities_enabled - Check specific capabilities are enabled or not
+ * @caps: Pointer to struct firmware_capabilities
+ * @field: Common/Platform capabilities bit field value
+
+ * Return: true if capabilities value is being set otherwise false
+ */
+bool gmu_core_capabilities_enabled(struct firmware_capabilities *caps, u32 field);
+
+/**
+ * gmu_core_mark_for_coldboot - Set a flag to coldboot gpu in the slumber exit
+ * @device: Pointer to KGSL device
+ *
+ */
+void gmu_core_mark_for_coldboot(struct kgsl_device *device);
+
+/**
+ * gmu_core_reserve_gmuaddr() - Reserve a gmuaddr in the GMU VA space
+ * @device: Pointer to the kgsl device
+ * @md: Pointer to the memdesc
+ * @vma_id: Target gmu vma where this buffer should be mapped
+ * @align: Alignment for the GMU VA and GMU mapping size
+ *
+ * This function reserves a gmu address based on the input parameters
+ *
+ * Return: 0 on success or negative error on failure
+ */
+int gmu_core_reserve_gmuaddr(struct kgsl_device *device, struct kgsl_memdesc *md,
+		u32 vma_id, u32 align);
+
+/**
+ * gmu_core_rdpm_probe - Probe GMU RDPM resources
+ * @device: Pointer to KGSL device
+ */
+void gmu_core_rdpm_probe(struct kgsl_device *device);
+
+/**
+ * gmu_core_rdpm_mx_freq_update - Update the mx frequency
+ * @device: Pointer to KGSL device
+ * @freq: Frequency in KHz
+ *
+ * This function communicates GPU mx frequency(in Mhz) changes to rdpm.
+ */
+void gmu_core_rdpm_mx_freq_update(struct kgsl_device *device, u32 freq);
+
+/**
+ * gmu_core_rdpm_cx_freq_update - Update the cx frequency
+ * @device: Pointer to KGSL device
+ * @freq: Frequency in KHz
+ *
+ * This function communicates GPU cx frequency(in Mhz) changes to rdpm.
+ */
+void gmu_core_rdpm_cx_freq_update(struct kgsl_device *device, u32 freq);
+
+/**
+ * gmu_core_clk_probe - Probe gmu clocks
+ * @device: Pointer to KGSL device
+ *
+ * Return: 0 on success or negative error on failure
+ */
+int gmu_core_clk_probe(struct kgsl_device *device);
+
+/**
+ * gmu_core_clock_set_rate - Set the gmu clock rate
+ * @device: Pointer to KGSL device
+ * @gmu_level: Requested gmu power level
+ *
+ * Returns 0 on success or error on clock set rate failure
+ */
+int gmu_core_clock_set_rate(struct kgsl_device *device, u32 gmu_level);
+
+/**
+ * gmu_core_enable_clks - Enable gmu clocks
+ * @device: Pointer to KGSL device
+ * @level: GMU frequency level
+ *
+ * Return: 0 on success or negative error on failure
+ */
+int gmu_core_enable_clks(struct kgsl_device *device, u32 level);
+
+/**
+ * gmu_core_disable_clks - Disable gmu clocks
+ * @device: Pointer to KGSL device
+ */
+void gmu_core_disable_clks(struct kgsl_device *device);
+
+/**
+ * gmu_core_scale_gmu_frequency - Scale GMU frequency based on DDR bus level
+ * @device: Pointer to KGSL device
+ * @buslevel: DDR bus level to determine the required GMU frequency
+ */
+void gmu_core_scale_gmu_frequency(struct kgsl_device *device, int buslevel);
+
+/**
+ * gmu_core_hwsched_memory_init() - Initialize GMU hardware-scheduler memory
+ * @device: Pointer to the kgsl device
+ *
+ * This function initializes the GMU hardware-scheduler memory
+ * by setting up the GMU virtual bank and GMU trace log.
+ *
+ * Return: 0 on success or negative error on failure.
+ */
+int gmu_core_hwsched_memory_init(struct kgsl_device *device);
+
+
+/**
+ * get_gmu_wrapper_pdev() - Get the GMU wrapper platform device
+ *
+ * Return: pointer to the GMU wrapper pdev if found, NULL otherwise.
+ */
+struct platform_device *get_gmu_wrapper_pdev(void);
+
+/**
+ * is_gmu_wrapper_available() - Check for the GMU wrapper device
+ *
+ * Returns: true if GMU wrapper device exists and available in the DT, false otherwise.
+ */
+bool is_gmu_wrapper_available(void);
+
+#endif /* __KGSL_GMU_CORE_H */

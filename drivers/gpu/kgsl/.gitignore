@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+#
+# Normal rules (sorted alphabetically)
+#
+.*.cmd
+.*.d
+*.ko
+*.mod
+*.mod.c
+*.o
+*.o.*
+*.patch
+*.symtypes
+Module.symvers
+modules.order
+
+#
+# Don't want to ignore the following even if they are dot-files
+#
+!.gitignore
+
+# ctags files
+tags
+!tags/
+TAGS
+
+# cscope files
+cscope.*
+ncscope.*
