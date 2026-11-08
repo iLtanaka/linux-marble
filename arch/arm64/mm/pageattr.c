@@ -101,6 +101,8 @@ bool can_set_direct_map(void)
 	return rodata_full || debug_pagealloc_enabled() ||
 		arm64_kfence_can_set_direct_map() || is_realm_world();
 }
+EXPORT_SYMBOL_GPL(can_set_direct_map);
+
 
 static int update_range_prot(unsigned long start, unsigned long size,
 			     pgprot_t set_mask, pgprot_t clear_mask)
@@ -262,6 +264,7 @@ int set_direct_map_invalid_noflush(struct page *page)
 	return update_range_prot((unsigned long)page_address(page),
 				 PAGE_SIZE, set_mask, clear_mask);
 }
+EXPORT_SYMBOL_GPL(set_direct_map_invalid_noflush);
 
 int set_direct_map_default_noflush(struct page *page)
 {
@@ -274,6 +277,7 @@ int set_direct_map_default_noflush(struct page *page)
 	return update_range_prot((unsigned long)page_address(page),
 				 PAGE_SIZE, set_mask, clear_mask);
 }
+EXPORT_SYMBOL_GPL(set_direct_map_default_noflush);
 
 static int __set_memory_enc_dec(unsigned long addr,
 				int numpages,

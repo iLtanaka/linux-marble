@@ -40,6 +40,32 @@
 	 * voltage; UPower needs one to turn charge into energy (it assumes
 	 * 10 V otherwise). The rated 3.87 V (19.35 Wh) is used here.
 	 */
+
+	hypervisor {
+		compatible = "qcom,gunyah-hypervisor-1.0", "qcom,gunyah-hypervisor", "simple-bus";
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		gunyah-vm {
+			compatible = "qcom,gunyah-vm-id-1.0", "qcom,gunyah-vm-id";
+			qcom,vmid = <3>;
+		};
+
+		gunyah-resource-mgr@0 {
+			compatible = "gunyah-resource-manager";
+			interrupts = <GIC_SPI 928 IRQ_TYPE_EDGE_RISING>,
+				     <GIC_SPI 929 IRQ_TYPE_EDGE_RISING>;
+			reg = <0x616c7743 0xf1f3267e>,
+			      <0x616c7743 0xf1f30f32>;
+			qcom,is-full-duplex;
+			qcom,free-irq-start = <960>;
+			qcom,tx-message-size = <240>;
+			qcom,rx-message-size = <240>;
+			qcom,tx-queue-depth = <8>;
+			qcom,rx-queue-depth = <8>;
+		};
+	};
+
 	battery: battery {
 		compatible = "simple-battery";
 		charge-full-design-microamp-hours = <5000000>;
