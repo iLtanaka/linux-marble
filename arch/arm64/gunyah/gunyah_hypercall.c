@@ -222,6 +222,25 @@ enum gunyah_error gunyah_hypercall_msgq_configure_send(u64 capid,
 EXPORT_SYMBOL_GPL(gunyah_hypercall_msgq_configure_send);
 
 /* x0 = queue cap, x1 = max message size, x2 = flags, x3 = 0 */
+enum gunyah_error gunyah_hypercall_msgqueue_create(u64 cap1, u64 cap2)
+{
+	register u64 x0 asm("x0") = cap1;
+	register u64 x1 asm("x1") = cap2;
+	register u64 x2 asm("x2") = 0;
+	register u64 x3 asm("x3") = 0;
+
+	asm volatile ("hvc #0x600B\n"
+		: "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
+		:
+		: GH_HVC_CLOBBERS);
+
+	pr_info("gunyah_hvc: msgq_create cap1=%#llx cap2=%#llx resp=%#llx\n",
+		cap1, cap2, (u64)x0);
+
+	return x0;
+}
+EXPORT_SYMBOL_GPL(gunyah_hypercall_msgqueue_create);
+
 enum gunyah_error gunyah_hypercall_msgq_configure_receive(u64 capid,
 							  u64 max_msg_size,
 							  u64 flags)

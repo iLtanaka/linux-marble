@@ -148,8 +148,8 @@ struct gunyah_rm {
 	struct xarray call_xarray;
 	u32 next_seq;
 
-	unsigned char recv_msg[GUNYAH_RM_MSGQ_MSG_SIZE];
-	unsigned char send_msg[GUNYAH_RM_MSGQ_MSG_SIZE];
+	unsigned char recv_msg[GUNYAH_RM_MSGQ_MSG_SIZE] __aligned(16);
+	unsigned char send_msg[GUNYAH_RM_MSGQ_MSG_SIZE] __aligned(16);
 	struct mutex send_lock;
 	struct completion send_ready;
 	struct blocking_notifier_head nh;
@@ -519,15 +519,52 @@ static irqreturn_t gunyah_rm_tx(int irq, void *data)
 }
 
 /*
- * The RM message queues are created by the hypervisor and already carry their
- * virq binding, so no 0x6017/0x6018 bind is needed here. What the native ABI
- * does require is programming the maximum message size on both queues before
- * the first send/receive (0x601F / 0x6020).
+ * 0x6017 / 0x6018 msgqueue_bind_send_virq:
+ *   x0=queue_cap, x1=virq_cap (TYPE 11 CAP!, not number!), x2=virq_number, x3=0
+ *   x1=0 -> ARG_INVAL (1).
+ *   virq_cap type 11 — no source available yet: VM_GET_HYP_RESOURCES (0x56000020)
+ *   is not a HVC in the 0x6000..0x6060 table, hyp memory (0x80256000) is not
+ *   accessible from guest.
+ *   Temporary stub: calling with x1=0 gives ARG_INVAL — will see in dmesg.
+ *   Real fix: get virq_cap from DT or reverse 0x56000020.
  */
+#define GUNYAH_RM_MSGQ_BIND(imm, capid, virq_cap, virq_num)			\
+({									\
+	register u64 _x0 asm("x0") = (capid);				\
+	register u64 _x1 asm("x1") = (virq_cap);				\
+	register u64 _x2 asm("x2") = (virq_num);				\
+	register u64 _x3 asm("x3") = 0;					\
+	register u64 _x4 asm("x4") = 0;					\
+	register u64 _x5 asm("x5") = 0;					\
+	register u64 _x6 asm("x6") = 0;					\
+	register u64 _x7 asm("x7") = 0;					\
+	asm volatile ("hvc #" #imm "\n"					\
+		: "+r"(_x0), "+r"(_x1), "+r"(_x2), "+r"(_x3),		\
+		  "+r"(_x4), "+r"(_x5), "+r"(_x6), "+r"(_x7)		\
+		: : "memory");						\
+	_x0;								\
+})
+
 static void gunyah_rm_configure_msgqs(struct gunyah_rm *rm)
 {
 	enum gunyah_error err;
 
+	/*
+	 * 0x600b partition_create_msgqueue: creates queue object (type 6).
+	 * Cap is not returned — caller must know cap in advance
+	 * (here from DT: tx_ghrsc.capid / rx_ghrsc.capid).
+	 * 0x600b sets max_msg_size=200, depth=8.
+	 */
+	err = gunyah_hypercall_msgqueue_create(rm->tx_ghrsc.capid,
+					       rm->rx_ghrsc.capid);
+	pr_info("gunyah_rm: msgq create tx=%#llx rx=%#llx ret=%d\n",
+		rm->tx_ghrsc.capid, rm->rx_ghrsc.capid, err);
+
+	/*
+	 * 0x601F / 0x6020 configure — mandatory before first send/recv.
+	 * 0x600b sets max_msg_size=200; configure overwrites it.
+	 * DT says qcom,rx/tx-message-size = <0xf0> (240) — keeping 240.
+	 */
 	err = gunyah_hypercall_msgq_configure_send(rm->tx_ghrsc.capid,
 						   GUNYAH_RM_MSGQ_MSG_SIZE, 0);
 	pr_info("gunyah_rm: msgq configure TX cap=%#llx ret=%d\n",
@@ -537,6 +574,22 @@ static void gunyah_rm_configure_msgqs(struct gunyah_rm *rm)
 						      GUNYAH_RM_MSGQ_MSG_SIZE, 0);
 	pr_info("gunyah_rm: msgq configure RX cap=%#llx ret=%d\n",
 		rm->rx_ghrsc.capid, err);
+
+	{
+		u64 ret;
+
+		/* x1 = virq_cap (type 11, from hypervisor during init),
+		 * x2 = virq_number (0x3a0 TX, 0x3a1 RX) */
+		ret = GUNYAH_RM_MSGQ_BIND(0x6017, rm->tx_ghrsc.capid,
+					  rm->tx_ghrsc.virq_cap, 0x3a0);
+		pr_info("gunyah_rm: msgq bind TX cap=%#llx virq_cap=%#llx ret=%#llx\n",
+			rm->tx_ghrsc.capid, rm->tx_ghrsc.virq_cap, ret);
+
+		ret = GUNYAH_RM_MSGQ_BIND(0x6018, rm->rx_ghrsc.capid,
+					  rm->rx_ghrsc.virq_cap, 0x3a1);
+		pr_info("gunyah_rm: msgq bind RX cap=%#llx virq_cap=%#llx ret=%#llx\n",
+			rm->rx_ghrsc.capid, rm->rx_ghrsc.virq_cap, ret);
+	}
 }
 
 static int gunyah_rm_msgq_send(struct gunyah_rm *rm, size_t size, bool push)

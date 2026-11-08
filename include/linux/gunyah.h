@@ -165,6 +165,7 @@ enum gunyah_resource_type {
 struct gunyah_resource {
 	enum gunyah_resource_type type;
 	u64 capid;
+	u64 virq_cap;	/* type 11 virq capability, set by hypervisor during init */
 	unsigned int irq;
 
 	struct list_head list;
@@ -469,6 +470,7 @@ enum gunyah_error gunyah_hypercall_msgq_recv(u64 capid, void *buff, size_t size,
 enum gunyah_error gunyah_hypercall_msgq_configure_send(u64 capid,
 						       u64 max_msg_size,
 						       u64 flags);
+enum gunyah_error gunyah_hypercall_msgqueue_create(u64 cap1, u64 cap2);
 enum gunyah_error gunyah_hypercall_msgq_configure_receive(u64 capid,
 							  u64 max_msg_size,
 							  u64 flags);
