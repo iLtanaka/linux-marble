@@ -271,8 +271,14 @@ static const struct component_ops a3xx_ops = {
 
 static int adreno_probe(struct platform_device *pdev)
 {
+	/*
+	 * Standalone GPU DRM device (separate_gpu_kms, or unrecognized GPU
+	 * owned by another driver like KGSL): msm_gpu_probe() registers its
+	 * own DRM and takes ownership. We must NOT also component_add().
+	 */
 	if (of_device_is_compatible(pdev->dev.of_node, "amd,imageon") ||
-	    msm_gpu_no_components())
+	    (msm_separate_gpu_kms_components() &&
+	     adreno_has_gpu(pdev->dev.of_node)))
 		return msm_gpu_probe(pdev, &a3xx_ops);
 
 	return component_add(&pdev->dev, &a3xx_ops);
@@ -280,12 +286,12 @@ static int adreno_probe(struct platform_device *pdev)
 
 static void adreno_remove(struct platform_device *pdev)
 {
-	struct msm_drm_private *priv = platform_get_drvdata(pdev);
-
-	if (priv->kms_init)
-		component_del(&pdev->dev, &a3xx_ops);
-	else
+	if (of_device_is_compatible(pdev->dev.of_node, "amd,imageon") ||
+	    (msm_separate_gpu_kms_components() &&
+	     adreno_has_gpu(pdev->dev.of_node)))
 		msm_gpu_remove(pdev, &a3xx_ops);
+	else
+		component_del(&pdev->dev, &a3xx_ops);
 }
 
 static void adreno_shutdown(struct platform_device *pdev)
@@ -298,8 +304,14 @@ static const struct of_device_id dt_match[] = {
 	{ .compatible = "qcom,adreno-3xx" },
 	/* for compatibility with imx5 gpu: */
 	{ .compatible = "amd,imageon" },
-	/* for backwards compat w/ downstream kgsl DT files: */
-	{ .compatible = "qcom,kgsl-3d0" },
+	/*
+	 * NOTE: "qcom,kgsl-3d0" intentionally removed.
+	 *
+	 * That compatible belongs to KGSL (msm_kgsl). If msm adreno matched
+	 * it, msm (built-in) would bind the GPU platform_device before
+	 * msm_kgsl.ko gets a chance to load, and KGSL could never acquire
+	 * the GPU node. Display still works because KMS runs without GPU.
+	 */
 	{}
 };
 MODULE_DEVICE_TABLE(of, dt_match);

@@ -54,17 +54,14 @@ static bool modeset = true;
 MODULE_PARM_DESC(modeset, "Use kernel modesetting [KMS] (1=on (default), 0=disable)");
 module_param(modeset, bool, 0600);
 
-static bool separate_gpu_kms;
-MODULE_PARM_DESC(separate_gpu_kms, "Use separate DRM device for the GPU (0=single DRM device for both GPU and display (default), 1=two DRM devices)");
-module_param(separate_gpu_kms, bool, 0400);
+static int separate_gpu_kms = -1;
+MODULE_PARM_DESC(separate_gpu_kms, "Use separate DRM device for the GPU (-1=auto (default), 0=single DRM device, 1=two DRM devices)");
+module_param(separate_gpu_kms, int, 0400);
 
 DECLARE_FAULT_ATTR(fail_gem_alloc);
 DECLARE_FAULT_ATTR(fail_gem_iova);
 
-bool msm_gpu_no_components(void)
-{
-	return separate_gpu_kms;
-}
+
 
 static int msm_drm_uninit(struct device *dev, const struct component_ops *gpu_ops)
 {
@@ -803,6 +800,14 @@ static const struct drm_ioctl_desc msm_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(MSM_PERFCNTR_CONFIG,   msm_ioctl_perfcntr_config,    DRM_RENDER_ALLOW),
 };
 
+static const struct drm_ioctl_desc msm_kms_ioctls[] = {
+	DRM_IOCTL_DEF_DRV(MSM_GEM_NEW, msm_ioctl_gem_new, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(MSM_GEM_INFO, msm_ioctl_gem_info, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(MSM_GEM_CPU_PREP, msm_ioctl_gem_cpu_prep, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(MSM_GEM_CPU_FINI, msm_ioctl_gem_cpu_fini, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(MSM_GEM_MADVISE, msm_ioctl_gem_madvise, DRM_RENDER_ALLOW),
+};
+
 static void msm_show_fdinfo(struct drm_printer *p, struct drm_file *file)
 {
 	struct drm_device *dev = file->minor->dev;
@@ -873,6 +878,8 @@ static const struct drm_driver msm_kms_driver = {
 	MSM_FBDEV_DRIVER_OPS,
 	.show_fdinfo        = msm_show_fdinfo,
 	.fops               = &fops,
+	.ioctls             = msm_kms_ioctls,
+	.num_ioctls         = ARRAY_SIZE(msm_kms_ioctls),
 	.name               = "msm-kms",
 	.desc               = "MSM Snapdragon DRM",
 	.major              = MSM_VERSION_MAJOR,
@@ -1010,9 +1017,58 @@ static const struct of_device_id msm_gpu_match[] = {
 	{ .compatible = "qcom,adreno" },
 	{ .compatible = "qcom,adreno-3xx" },
 	{ .compatible = "amd,imageon" },
-	{ .compatible = "qcom,kgsl-3d0" },
+	/*
+	 * NOTE: "qcom,kgsl-3d0" intentionally NOT listed here.
+	 *
+	 * That compatible is owned by KGSL (msm_kgsl). If msm listed it,
+	 * adreno (msm) would bind to the GPU node and KGSL could never
+	 * acquire it. KMS still works on such DTs because
+	 * msm_separate_gpu_kms_components() returns true when no recognized
+	 * Adreno GPU is present.
+	 */
 	{ },
 };
+
+/*
+ * Return true if display should be a separate DRM device without GPU.
+ *
+ * This is the case if:
+ *   - there is no recognized Adreno GPU node (e.g. GPU node is owned by
+ *     KGSL with "qcom,kgsl-3d0" compatible), OR
+ *   - separate_gpu_kms=1 was explicitly requested.
+ *
+ * When no recognized Adreno GPU is present, display must ALWAYS be
+ * separate regardless of separate_gpu_kms, otherwise the KMS driver
+ * would try to load a non-existent GPU and hang.
+ */
+bool msm_separate_gpu_kms_components(void)
+{
+	struct device_node *np;
+	bool found_gpu;
+
+	np = of_find_matching_node(NULL, msm_gpu_match);
+	if (!np)
+		return true;
+
+	found_gpu = of_device_is_available(np) && adreno_has_gpu(np);
+	of_node_put(np);
+
+	/*
+	 * No recognized Adreno GPU (e.g. GPU node owned by KGSL with
+	 * "qcom,kgsl-3d0"): display must run on its own DRM device, and the
+	 * GPU node must be left free for KGSL to bind.
+	 */
+	if (!found_gpu)
+		return true;
+
+	if (separate_gpu_kms == 1)
+		return true;
+	if (separate_gpu_kms == 0)
+		return false;
+
+	/* auto: single GPU + single display -> single card */
+	return false;
+}
 
 static int add_gpu_components(struct device *dev,
 			      struct component_match **matchptr)
@@ -1034,7 +1090,7 @@ static int add_gpu_components(struct device *dev,
 static int msm_drm_bind(struct device *dev)
 {
 	return msm_drm_init(dev,
-			    msm_gpu_no_components() ?
+			    msm_separate_gpu_kms_components() ?
 				    &msm_kms_driver :
 				    &msm_driver,
 			    NULL);
@@ -1073,7 +1129,7 @@ int msm_drv_probe(struct device *master_dev,
 			return ret;
 	}
 
-	if (!msm_gpu_no_components()) {
+	if (!msm_separate_gpu_kms_components()) {
 		ret = add_gpu_components(master_dev, &match);
 		if (ret)
 			return ret;
