@@ -7,6 +7,7 @@
  */
 
 #include <linux/arm-smccc.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/gunyah.h>
 #include <linux/uuid.h>
@@ -117,13 +118,19 @@ enum gunyah_error gunyah_hypercall_bell_set_mask(u64 capid, u64 enable_mask, u64
 }
 EXPORT_SYMBOL_GPL(gunyah_hypercall_bell_set_mask);
 
+/*
+ * Native Qualcomm ABI for 0x601B:
+ *   x0 = queue cap, x1 = buffer IPA, x2 = size, x3 = flags (bit0 only),
+ *   x4 = 0. The buffer is consumed as an IPA by the hypervisor, so the
+ *   kernel virtual address has to be converted before the call.
+ */
 enum gunyah_error gunyah_hypercall_msgq_send(u64 capid, size_t size, void *buff,
 					     u64 tx_flags, bool *ready)
 {
 	register u64 x0 asm("x0") = capid;
-	register u64 x1 asm("x1") = size;
-	register u64 x2 asm("x2") = (uintptr_t)buff;
-	register u64 x3 asm("x3") = tx_flags;
+	register u64 x1 asm("x1") = virt_to_phys(buff);
+	register u64 x2 asm("x2") = size;
+	register u64 x3 asm("x3") = tx_flags & BIT(0);
 	register u64 x4 asm("x4") = 0;
 	register u64 x5 asm("x5") = 0;
 	register u64 x6 asm("x6") = 0;
@@ -135,9 +142,9 @@ enum gunyah_error gunyah_hypercall_msgq_send(u64 capid, size_t size, void *buff,
 		:
 		: GH_HVC_CLOBBERS);
 
-	pr_info("gunyah_hvc: msgq_send resp x0=%llx x1=%llx x2=%llx x3=%llx x4=%llx x5=%llx x6=%llx x7=%llx\n",
-		(u64)x0, (u64)x1, (u64)x2, (u64)x3,
-		(u64)x4, (u64)x5, (u64)x6, (u64)x7);
+	pr_info("gunyah_hvc: msgq_send cap=%#llx ipa=%#llx size=%zu flags=%llu resp x0=%#llx x1=%#llx\n",
+		capid, (u64)virt_to_phys(buff), size, tx_flags & BIT(0),
+		(u64)x0, (u64)x1);
 
 	if (x0 == GUNYAH_ERROR_OK)
 		*ready = !!x1;
@@ -146,32 +153,95 @@ enum gunyah_error gunyah_hypercall_msgq_send(u64 capid, size_t size, void *buff,
 }
 EXPORT_SYMBOL_GPL(gunyah_hypercall_msgq_send);
 
+/*
+ * The native 0x601C call does not return the result in x1/x2: it writes a
+ * response structure to the IPA passed in guest x8. Only x0 carries the
+ * error code.
+ */
+struct gunyah_msgq_recv_resp {
+	u32 recv_size;
+	u32 reserved0;
+	u64 ready_or_len;
+	u32 flags;
+	u32 reserved1;
+};
+
 enum gunyah_error gunyah_hypercall_msgq_recv(u64 capid, void *buff, size_t size,
 					     size_t *recv_size, bool *ready)
 {
+	struct gunyah_msgq_recv_resp resp = { 0 };
 	register u64 x0 asm("x0") = capid;
-	register u64 x1 asm("x1") = (uintptr_t)buff;
+	register u64 x1 asm("x1") = virt_to_phys(buff);
 	register u64 x2 asm("x2") = size;
 	register u64 x3 asm("x3") = 0;
-	register u64 x4 asm("x4") = 0;
-	register u64 x5 asm("x5") = 0;
-	register u64 x6 asm("x6") = 0;
-	register u64 x7 asm("x7") = 0;
+	register u64 x8 asm("x8") = virt_to_phys(&resp);
 
 	asm volatile ("hvc #0x601C\n"
-		: "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3),
-		  "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7)
+		: "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x8)
 		:
-		: GH_HVC_CLOBBERS);
+		: "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+		  "x16", "x17", "memory");
+
+	pr_info("gunyah_hvc: msgq_recv cap=%#llx ipa=%#llx size=%zu resp x0=%#llx size=%u ready=%#llx flags=%#x\n",
+		capid, (u64)virt_to_phys(buff), size, (u64)x0,
+		resp.recv_size, resp.ready_or_len, resp.flags);
 
 	if (x0 == GUNYAH_ERROR_OK) {
-		*recv_size = x1;
-		*ready = !!x2;
+		*recv_size = resp.recv_size;
+		/*
+		 * The native "more messages pending" bit is not documented;
+		 * drain until the queue reports GUNYAH_ERROR_MSGQUEUE_EMPTY.
+		 */
+		*ready = true;
 	}
 
 	return x0;
 }
 EXPORT_SYMBOL_GPL(gunyah_hypercall_msgq_recv);
+
+/* x0 = queue cap, x1 = max message size, x2 = flags (bit0 = 0), x3 = 0 */
+enum gunyah_error gunyah_hypercall_msgq_configure_send(u64 capid,
+						       u64 max_msg_size,
+						       u64 flags)
+{
+	register u64 x0 asm("x0") = capid;
+	register u64 x1 asm("x1") = max_msg_size;
+	register u64 x2 asm("x2") = flags;
+	register u64 x3 asm("x3") = 0;
+
+	asm volatile ("hvc #0x601F\n"
+		: "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
+		:
+		: GH_HVC_CLOBBERS);
+
+	pr_info("gunyah_hvc: msgq_configure_send cap=%#llx max=%llu resp=%#llx\n",
+		capid, max_msg_size, (u64)x0);
+
+	return x0;
+}
+EXPORT_SYMBOL_GPL(gunyah_hypercall_msgq_configure_send);
+
+/* x0 = queue cap, x1 = max message size, x2 = flags, x3 = 0 */
+enum gunyah_error gunyah_hypercall_msgq_configure_receive(u64 capid,
+							  u64 max_msg_size,
+							  u64 flags)
+{
+	register u64 x0 asm("x0") = capid;
+	register u64 x1 asm("x1") = max_msg_size;
+	register u64 x2 asm("x2") = flags;
+	register u64 x3 asm("x3") = 0;
+
+	asm volatile ("hvc #0x6020\n"
+		: "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
+		:
+		: GH_HVC_CLOBBERS);
+
+	pr_info("gunyah_hvc: msgq_configure_recv cap=%#llx max=%llu resp=%#llx\n",
+		capid, max_msg_size, (u64)x0);
+
+	return x0;
+}
+EXPORT_SYMBOL_GPL(gunyah_hypercall_msgq_configure_receive);
 
 enum gunyah_error gunyah_hypercall_addrspace_map(u64 capid, u64 extent_capid, u64 vbase,
 					u32 extent_attrs, u32 flags, u64 offset, u64 size)

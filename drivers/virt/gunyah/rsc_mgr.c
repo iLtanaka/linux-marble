@@ -478,7 +478,7 @@ static irqreturn_t gunyah_rm_rx(int irq, void *data)
 
 		if (len < sizeof(*hdr)) {
 			pr_err_ratelimited("Too small message received. size=%ld\n", len);
-			continue;
+			break;
 		}
 
 		hdr = msg;
@@ -519,42 +519,24 @@ static irqreturn_t gunyah_rm_tx(int irq, void *data)
 }
 
 /*
- * Qualcomm firmware requires the message queue to be bound to its completion
- * virq before the first transfer. The function ID lives in the HVC immediate,
- * so every bind needs its own instruction.
+ * The RM message queues are created by the hypervisor and already carry their
+ * virq binding, so no 0x6017/0x6018 bind is needed here. What the native ABI
+ * does require is programming the maximum message size on both queues before
+ * the first send/receive (0x601F / 0x6020).
  */
-#define GUNYAH_RM_MSGQ_BIND(imm, capid)					\
-({									\
-	register u64 _x0 asm("x0") = (capid);				\
-	register u64 _x1 asm("x1") = 0;					\
-	register u64 _x2 asm("x2") = 0;					\
-	register u64 _x3 asm("x3") = 0;					\
-	register u64 _x4 asm("x4") = 0;					\
-	register u64 _x5 asm("x5") = 0;					\
-	register u64 _x6 asm("x6") = 0;					\
-	register u64 _x7 asm("x7") = 0;					\
-	asm volatile ("hvc #" #imm "\n"					\
-		: "+r"(_x0), "+r"(_x1), "+r"(_x2), "+r"(_x3),		\
-		  "+r"(_x4), "+r"(_x5), "+r"(_x6), "+r"(_x7)		\
-		: : "memory");						\
-	_x0;								\
-})
-
-static void gunyah_rm_bind_msgqs(struct gunyah_rm *rm)
+static void gunyah_rm_configure_msgqs(struct gunyah_rm *rm)
 {
-	u64 ret;
+	enum gunyah_error err;
 
-	ret = GUNYAH_RM_MSGQ_BIND(0x6017, rm->tx_ghrsc.capid);
-	pr_info("gunyah_rm: msgq bind TX cap=%#llx ret=%#llx\n",
-		rm->tx_ghrsc.capid, ret);
+	err = gunyah_hypercall_msgq_configure_send(rm->tx_ghrsc.capid,
+						   GUNYAH_RM_MSGQ_MSG_SIZE, 0);
+	pr_info("gunyah_rm: msgq configure TX cap=%#llx ret=%d\n",
+		rm->tx_ghrsc.capid, err);
 
-	/*
-	 * 0x6018 is only believed to be the receive-side bind; the return
-	 * value is logged so we can tell whether it is the right call.
-	 */
-	ret = GUNYAH_RM_MSGQ_BIND(0x6018, rm->rx_ghrsc.capid);
-	pr_info("gunyah_rm: msgq bind RX cap=%#llx ret=%#llx\n",
-		rm->rx_ghrsc.capid, ret);
+	err = gunyah_hypercall_msgq_configure_receive(rm->rx_ghrsc.capid,
+						      GUNYAH_RM_MSGQ_MSG_SIZE, 0);
+	pr_info("gunyah_rm: msgq configure RX cap=%#llx ret=%d\n",
+		rm->rx_ghrsc.capid, err);
 }
 
 static int gunyah_rm_msgq_send(struct gunyah_rm *rm, size_t size, bool push)
@@ -1006,7 +988,7 @@ static int __init gunyah_rm_init(void)
 	if (ret)
 		goto free_tx_irq;
 
-	gunyah_rm_bind_msgqs(rm);
+	gunyah_rm_configure_msgqs(rm);
 
 	rm->miscdev.name = "gunyah";
 	rm->miscdev.minor = MISC_DYNAMIC_MINOR;

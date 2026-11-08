@@ -466,6 +466,12 @@ enum gunyah_error gunyah_hypercall_msgq_send(u64 capid, size_t size, void *buff,
 					     u64 tx_flags, bool *ready);
 enum gunyah_error gunyah_hypercall_msgq_recv(u64 capid, void *buff, size_t size,
 					     size_t *recv_size, bool *ready);
+enum gunyah_error gunyah_hypercall_msgq_configure_send(u64 capid,
+						       u64 max_msg_size,
+						       u64 flags);
+enum gunyah_error gunyah_hypercall_msgq_configure_receive(u64 capid,
+							  u64 max_msg_size,
+							  u64 flags);
 
 #define GUNYAH_ADDRSPACE_SELF_CAP 0
 
