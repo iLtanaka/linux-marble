@@ -840,6 +840,9 @@ static const struct file_operations fops = {
 		DRIVER_GEM_GPUVA | \
 		DRIVER_ATOMIC | \
 		DRIVER_MODESET | \
+		DRIVER_RENDER | \
+		DRIVER_SYNCOBJ | \
+		DRIVER_SYNCOBJ_TIMELINE | \
 		0 )
 
 static const struct drm_driver msm_driver = {

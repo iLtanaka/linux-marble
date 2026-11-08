@@ -1,0 +1,1445 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Placeholder device tree for Xiaomi Poco F5 / Redmi Note 12 Turbo (marble).
+ */
+/dts-v1/;
+
+#include <dt-bindings/arm/qcom,ids.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+
+#include "sm8475.dtsi"
+#include "pm8350.dtsi"
+#include "pm8350b.dtsi"
+#include "pm8350c.dtsi"
+#include "pm8450.dtsi"
+#include "pmk8350.dtsi"
+#include "pmr735a.dtsi"
+
+/delete-node/ &adsp_mem;
+/delete-node/ &rmtfs_mem;
+/delete-node/ &xbl_ramdump_mem;
+/delete-node/ &xbl_sc_mem;
+
+/ {
+	model = "Marble based on Qualcomm Technologies, Inc SM7475";
+	compatible = "qcom,ukee-mtp", "qcom,ukee", "qcom,mtp", "xiaomi,marble", "qcom,sm7475", "qcom,sm8475";
+	qcom,msm-id = <0x24f 0x10000>;
+	qcom,board-id = <0x10008 0x00>;
+	chassis-type = "handset";
+
+	/*
+	 * Battery/charger run in ADSP firmware (battmgr) over pmic_glink. No
+	 * usb-c-connector yet: usb_1_dwc3 stays dr_mode=peripheral for netboot.
+	 */
+	/*
+	 * BP4K / M16T 5000 mAh cell. The ADSP does not report a design
+	 * voltage; UPower needs one to turn charge into energy (it assumes
+	 * 10 V otherwise). The rated 3.87 V (19.35 Wh) is used here.
+	 */
+
+	hypervisor {
+		compatible = "qcom,gunyah-hypervisor-1.0", "qcom,gunyah-hypervisor", "simple-bus";
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		gunyah-vm {
+			compatible = "qcom,gunyah-vm-id-1.0", "qcom,gunyah-vm-id";
+			qcom,vmid = <3>;
+		};
+
+		gunyah-resource-mgr@0 {
+			compatible = "gunyah-resource-manager";
+			interrupts = <GIC_SPI 928 IRQ_TYPE_EDGE_RISING>,
+				     <GIC_SPI 929 IRQ_TYPE_EDGE_RISING>;
+			reg = <0x616c7743 0xf1f3267e>,
+			      <0x616c7743 0xf1f30f32>;
+			qcom,is-full-duplex;
+			qcom,free-irq-start = <960>;
+			qcom,tx-message-size = <240>;
+			qcom,rx-message-size = <240>;
+			qcom,tx-queue-depth = <8>;
+			qcom,rx-queue-depth = <8>;
+		};
+	};
+
+	battery: battery {
+		compatible = "simple-battery";
+		charge-full-design-microamp-hours = <5000000>;
+		voltage-min-design-microvolt = <3870000>;
+	};
+
+	pmic-glink {
+		compatible = "qcom,sm8475-pmic-glink", "qcom,sm8450-pmic-glink", "qcom,pmic-glink";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		monitored-battery = <&battery>;
+	};
+
+	/* QCA6490 (WCN6855 family, PCI 17cb:1103) wired as on sm8450-hdk */
+	wcn6855-pmu {
+		compatible = "qcom,wcn6855-pmu";
+
+		pinctrl-0 = <&bt_en>, <&wlan_en>, <&xo_clk_default>;
+		pinctrl-names = "default";
+
+		wlan-enable-gpios = <&tlmm 80 GPIO_ACTIVE_HIGH>;
+		bt-enable-gpios = <&tlmm 81 GPIO_ACTIVE_HIGH>;
+		swctrl-gpios = <&tlmm 82 GPIO_ACTIVE_HIGH>;
+		xo-clk-gpios = <&tlmm 204 GPIO_ACTIVE_HIGH>;
+
+		vddio-supply = <&pm8350_s10>;
+		vddaon-supply = <&pm8350_s11>;
+		vddpmu-supply = <&pm8350_s12>;
+		vddpmumx-supply = <&pmr735a_s2>;
+		vddpmucx-supply = <&pm8350_s11>;
+		vddrfa0p95-supply = <&pm8350_s11>;
+		vddrfa1p3-supply = <&pm8350_s12>;
+		vddrfa1p9-supply = <&pm8350c_s1>;
+		vddpcie1p3-supply = <&pm8350_s12>;
+		vddpcie1p9-supply = <&pm8350c_s1>;
+
+		regulators {
+			vreg_pmu_rfa_cmn_0p8: ldo0 {
+				regulator-name = "vreg_pmu_rfa_cmn_0p8";
+			};
+
+			vreg_pmu_aon_0p8: ldo1 {
+				regulator-name = "vreg_pmu_aon_0p8";
+			};
+
+			vreg_pmu_wlcx_0p8: ldo2 {
+				regulator-name = "vreg_pmu_wlcx_0p8";
+			};
+
+			vreg_pmu_wlmx_0p8: ldo3 {
+				regulator-name = "vreg_pmu_wlmx_0p8";
+			};
+
+			vreg_pmu_btcmx_0p8: ldo4 {
+				regulator-name = "vreg_pmu_btcmx_0p8";
+			};
+
+			vreg_pmu_pcie_1p8: ldo5 {
+				regulator-name = "vreg_pmu_pcie_1p8";
+			};
+
+			vreg_pmu_pcie_0p9: ldo6 {
+				regulator-name = "vreg_pmu_pcie_0p9";
+			};
+
+			vreg_pmu_rfa_0p8: ldo7 {
+				regulator-name = "vreg_pmu_rfa_0p8";
+			};
+
+			vreg_pmu_rfa_1p2: ldo8 {
+				regulator-name = "vreg_pmu_rfa_1p2";
+			};
+
+			vreg_pmu_rfa_1p7: ldo9 {
+				regulator-name = "vreg_pmu_rfa_1p7";
+			};
+		};
+	};
+
+	/delete-node/ memory@a0000000;
+
+	memory {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x6a000000>,
+		      <0x0 0xf4600000 0x0 0x0ba00000>,
+		      <0x8 0x00000000 0x0 0x37500000>,
+		      <0x9 0x00000000 0x1 0x80000000>,
+		      <0x8 0x40000000 0x0 0xc0000000>,
+		      <0x8 0x37b00000 0x0 0x01e00000>;
+	};
+
+	aliases {
+		serial0 = &uart7;
+		serial1 = &uart20;
+	};
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		stdout-path = "serial0:115200n8";
+
+		bootargs = "PMOS_NOSPLASH console=tty0 console=ttyMSM0,115200n8 earlycon loglevel=8 ignore_loglevel printk.devkmsg=on pstore.compress=none log_buf_len=2M msm_geni_serial.con_enabled=0";
+
+		framebuffer: framebuffer@b8000000 {
+			compatible = "simple-framebuffer";
+			reg = <0x0 0xb8000000 0x0 0x2b00000>;
+			width = <1080>;
+			height = <2400>;
+			stride = <(1080 * 4)>;
+			format = "a8r8g8b8";
+
+			clocks = <&gcc GCC_DISP_HF_AXI_CLK>;
+		};
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		pinctrl-0 = <&vol_up_n>;
+		pinctrl-names = "default";
+
+		key-volume-up {
+			label = "Volume Up";
+			linux,code = <KEY_VOLUMEUP>;
+			gpios = <&pm8350_gpios 6 GPIO_ACTIVE_LOW>;
+			debounce-interval = <15>;
+			wakeup-source;
+		};
+	};
+
+	reserved-memory {
+		/*
+		 * Encoder ARP buffers (one 256 KiB slot per session). Handed to
+		 * VMID CP_NON_PIXEL by the iris driver, so never mapped by Linux.
+		 */
+		iris_arp_mem: iris-arp {
+			size = <0x0 0x100000>;
+			alignment = <0x0 0x40000>;
+			no-map;
+		};
+
+		xbl_ramdump_mem: memory@a6b80000 {
+			reg = <0x0 0xa6b80000 0x0 0x280000>;
+			no-map;
+		};
+
+		xbl_sc_mem: memory@a6e00000 {
+			reg = <0x0 0xa6e00000 0x0 0x40000>;
+			no-map;
+		};
+
+		adsp_mem: memory@9fd00000 {
+			reg = <0x0 0x9fd00000 0x0 0x3100000>;
+			no-map;
+		};
+
+		ramoops@a7000000 {
+			compatible = "ramoops";
+			reg = <0x0 0xa7000000 0x0 0x400000>;
+			record-size = <0x200000>;
+			pmsg-size = <0x200000>;
+			console-size = <0x200000>;
+			no-map;
+		};
+
+		/*
+		 * Stock allocates rmtfs dynamically; the sm8450.dtsi address is
+		 * taken by adsp_mem here. 0xa2e00000-0xa6b80000 is free RAM in
+		 * the stock memory map, leave 2 MiB after adsp_mem.
+		 */
+		rmtfs_mem: memory@a3000000 {
+			compatible = "qcom,rmtfs-mem";
+			reg = <0x0 0xa3000000 0x0 0x282000>;
+			no-map;
+
+			qcom,client-id = <1>;
+			qcom,use-guard-pages;
+			qcom,vmid = <QCOM_SCM_VMID_MSS_MSA>;
+		};
+
+		splash_region@b8000000 {
+			reg = <0x0 0xb8000000 0x0 0x2b00000>;
+			no-map;
+		};
+	};
+
+	vph_pwr: vph-pwr-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vph_pwr";
+		regulator-min-microvolt = <3700000>;
+		regulator-max-microvolt = <3700000>;
+
+		regulator-always-on;
+		regulator-boot-on;
+	};
+};
+
+/ {
+	/* Stock wcd938x-codec: reset gpio43, 1.8 V from S10B, micbias 2.75 V from BOB */
+	wcd938x: audio-codec {
+		compatible = "qcom,wcd9385-codec";
+
+		pinctrl-0 = <&wcd_default>;
+		pinctrl-names = "default";
+
+		qcom,micbias1-microvolt = <2750000>;
+		qcom,micbias2-microvolt = <2750000>;
+		qcom,micbias3-microvolt = <2750000>;
+		qcom,micbias4-microvolt = <2750000>;
+		qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
+		qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
+		qcom,mbhc-headphone-vthreshold-microvolt = <50000>;
+		qcom,rx-device = <&wcd_rx>;
+		qcom,tx-device = <&wcd_tx>;
+
+		reset-gpios = <&tlmm 43 GPIO_ACTIVE_LOW>;
+
+		vdd-buck-supply = <&pm8350_s10>;
+		vdd-rxtx-supply = <&pm8350_s10>;
+		vdd-io-supply = <&pm8350_s10>;
+		vdd-mic-bias-supply = <&pm8350c_bob>;
+
+		#sound-dai-cells = <1>;
+	};
+};
+
+&apps_rsc {
+	regulators-0 {
+		compatible = "qcom,pm8350-rpmh-regulators";
+		qcom,pmic-id = "b";
+
+		/*
+		 * usb/pcie0 phy 0.88 V (stock init 880 mV, sm8450-hdk 880-888 mV);
+		 * at the old 720 mV floor the pcie0 qmp phy timed out on init.
+		 */
+		pm8350_l5: ldo5 {
+			regulator-name = "pm8350_l5";
+			regulator-min-microvolt = <880000>;
+			regulator-max-microvolt = <888000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		pm8350_s10: smps10 {
+			regulator-name = "pm8350_s10";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		pm8350_l2: ldo2 {
+			regulator-name = "pm8350_l2";
+			regulator-min-microvolt = <2700000>;
+			regulator-max-microvolt = <3300000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		pm8350_l7: ldo7 {
+			regulator-name = "pm8350_l7";
+			regulator-min-microvolt = <2400000>;
+			regulator-max-microvolt = <3544000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		pm8350_l9: ldo9 {
+			regulator-name = "pm8350_l9";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1304000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		/* QCA6490 rails, same as sm8450-hdk (stock cnss vdd-wlan-dig/-rfa2) */
+		pm8350_s11: smps11 {
+			regulator-name = "pm8350_s11";
+			regulator-min-microvolt = <966000>;
+			regulator-max-microvolt = <1104000>;
+		};
+
+		pm8350_s12: smps12 {
+			regulator-name = "pm8350_s12";
+			regulator-min-microvolt = <1350000>;
+			regulator-max-microvolt = <1400000>;
+		};
+	};
+
+	regulators-1 {
+		compatible = "qcom,pm8350c-rpmh-regulators";
+		qcom,pmic-id = "c";
+
+		/* WCD9385 micbias supply (stock cdc-vdd-mic-bias) */
+		pm8350c_bob: bob {
+			regulator-name = "pm8350c_bob";
+			regulator-min-microvolt = <3008000>;
+			regulator-max-microvolt = <3960000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_AUTO>;
+		};
+
+		/* QCA6490 vddrfa1p9 / vddpcie1p9 (stock vdd-wlan-rfa1) */
+		pm8350c_s1: smps1 {
+			regulator-name = "pm8350c_s1";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <2024000>;
+		};
+
+		/* touch vddio: stock 1.8 V fixed */
+		pm8350c_l2: ldo2 {
+			regulator-name = "pm8350c_l2";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		/* touch avdd: stock 3.224 V fixed */
+		pm8350c_l9: ldo9 {
+			regulator-name = "pm8350c_l9";
+			regulator-min-microvolt = <3224000>;
+			regulator-max-microvolt = <3224000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		pm8350c_l10: ldo10 {
+			regulator-name = "pm8350c_l10";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1304000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		/* panel vddio: stock 1.8 V */
+		pm8350c_l12: ldo12 {
+			regulator-name = "pm8350c_l12";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		/* panel vci: stock 3.0 V */
+		pm8350c_l13: ldo13 {
+			regulator-name = "pm8350c_l13";
+			regulator-min-microvolt = <3000000>;
+			regulator-max-microvolt = <3000000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+
+	/*
+	 * PM8350B LDOs (stock rpmh resource "ldod1"). No pm8350b table in
+	 * mainline; the resource name is built from pmic-id + ldoN, and L1
+	 * is an NLDO like pm8350's, so reuse that table.
+	 */
+	regulators-2 {
+		compatible = "qcom,pm8350-rpmh-regulators";
+		qcom,pmic-id = "d";
+
+		/* panel vddd: stock 1.2 V */
+		pm8350b_l1: ldo1 {
+			regulator-name = "pm8350b_l1";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+
+	regulators-3 {
+		compatible = "qcom,pmr735a-rpmh-regulators";
+		qcom,pmic-id = "e";
+
+		/* QCA6490 vddpmumx (stock vdd-wlan-aon) */
+		pmr735a_s2: smps2 {
+			regulator-name = "pmr735a_s2";
+			regulator-min-microvolt = <500000>;
+			regulator-max-microvolt = <1040000>;
+		};
+
+		/* WLAN antenna switch (stock wlan-ant-switch-supply, 2.8 V) */
+		pmr735a_l7: ldo7 {
+			regulator-name = "pmr735a_l7";
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <2800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			regulator-always-on;
+		};
+	};
+
+	regulators-4 {
+		compatible = "qcom,pm8450-rpmh-regulators";
+		qcom,pmic-id = "h";
+
+		pm8450_l4: ldo4 {
+			regulator-name = "pm8450_l4";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+};
+
+&gpi_dma0 {
+	/*
+	 * iommus kept from sm8450.dtsi (SID 0x5b6, matches live stock): with
+	 * ARM_SMMU_DISABLE_BYPASS_BY_DEFAULT=y, deleting it would fault the
+	 * touch SPI / i2c5 GPI DMA instead of bypassing.
+	 */
+	status = "okay";
+};
+
+&gpi_dma1 {
+	status = "okay";
+
+	/delete-property/ iommus;
+};
+
+&gpi_dma2 {
+	status = "okay";
+
+	/delete-property/ iommus;
+};
+
+&gpu {
+	/*
+	 * Adreno 730v3 (stock qcom,chipid 0x07030002, sold as "725"). Firmware
+	 * from stock /vendor/firmware: a730_sqe.fw + gmu_gen70000.bin in
+	 * qcom/, the Xiaomi-signed zap below. Same setup as sm8475-nothing-pong.
+	 */
+	status = "okay";
+
+	zap-shader {
+		firmware-name = "qcom/sm8475/xiaomi/marble/a730_zap.mbn";
+	};
+};
+
+&iris {
+	status = "okay";
+
+	/*
+	 * VPU2 reads the encoder ARP buffer through the secure non-pixel stream
+	 * ID, which the hypervisor walks with VMID CP_NON_PIXEL's stage 2 (stock:
+	 * secure_non_pixel_cb, ARP at IOVA 0x257c0000). It must not share a
+	 * context bank with the HLOS stream IDs, so give it its own device.
+	 */
+	non-pixel {
+		iommus = <&apps_smmu 0x2184 0x400>;
+		memory-region = <&iris_arp_mem>;
+		qcom,iommu-vmid = <0xb>; /* QCOM_SCM_VMID_CP_NON_PIXEL */
+	};
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	vdda-supply = <&pm8350c_l10>;
+	status = "okay";
+
+	panel@0 {
+		compatible = "xiaomi,marble-m16t-36-02-0a";
+		reg = <0>;
+
+		/* stock: qcom,platform-reset-gpio = <&tlmm 0 0> */
+		reset-gpios = <&tlmm 0 GPIO_ACTIVE_LOW>;
+
+		vddio-supply = <&pm8350c_l12>;
+		vddd-supply = <&pm8350b_l1>;
+		vci-supply = <&pm8350c_l13>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&panel_in>;
+};
+
+&mdss_dsi0_phy {
+	vdds-supply = <&pm8350_l5>;
+	status = "okay";
+};
+
+&pcie0 {
+	max-link-speed = <2>;
+	status = "okay";
+};
+
+&pcie0_phy {
+	/*
+	 * cape pcie0 phy is QSERDES V6 (stock qcom,phy-sequence), not the
+	 * sm8450 V5 one. Stock supplies: vreg-0p9 = pm8350_l5 (0.88 V),
+	 * vreg-1p8 = pm8350c_l10 (1.2 V).
+	 */
+	compatible = "qcom,sm8475-qmp-gen3x1-pcie-phy";
+	vdda-phy-supply = <&pm8350_l5>;
+	vdda-pll-supply = <&pm8350c_l10>;
+	status = "okay";
+};
+
+&pcieport0 {
+	wifi@0 {
+		compatible = "pci17cb,1103";
+		reg = <0x10000 0x0 0x0 0x0 0x0>;
+
+		vddrfacmn-supply = <&vreg_pmu_rfa_cmn_0p8>;
+		vddaon-supply = <&vreg_pmu_aon_0p8>;
+		vddwlcx-supply = <&vreg_pmu_wlcx_0p8>;
+		vddwlmx-supply = <&vreg_pmu_wlmx_0p8>;
+		vddpcie1p8-supply = <&vreg_pmu_pcie_1p8>;
+		vddpcie0p9-supply = <&vreg_pmu_pcie_0p9>;
+		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
+		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
+		vddrfa1p8-supply = <&vreg_pmu_rfa_1p7>;
+	};
+};
+
+&pon_pwrkey {
+	status = "okay";
+};
+
+&pon_resin {
+	linux,code = <KEY_VOLUMEDOWN>;
+	status = "okay";
+};
+
+/*
+ * Stock (qcom,gpu-pwrlevels) runs this A730v3 at 220..580 MHz only; the
+ * inherited SM8475 table goes to 900 MHz at TURBO_L1, above this bin.
+ */
+&gpu_opp_table {
+	/*
+	 * Keep only the stock levels 220/285/324/364/439/515/580 MHz. The merged
+	 * sm8450+sm8475 table had 18 OPPs, more than the GMU's 16 slots.
+	 */
+	/delete-node/ opp-900000000;
+	/delete-node/ opp-862000000;
+	/delete-node/ opp-815000000;
+	/delete-node/ opp-765000000;
+	/delete-node/ opp-710000000;
+	/delete-node/ opp-645000000;
+	/delete-node/ opp-818000000;
+	/delete-node/ opp-791000000;
+	/delete-node/ opp-734000000;
+	/delete-node/ opp-640000000;
+	/delete-node/ opp-599000000;
+	/delete-node/ opp-545000000;
+	/delete-node/ opp-492000000;
+	/delete-node/ opp-421000000;
+	/delete-node/ opp-350000000;
+	/delete-node/ opp-317000000;
+};
+
+&remoteproc_adsp {
+	firmware-name = "qcom/sm8475/xiaomi/marble/adsp2.mdt";
+	status = "okay";
+};
+
+&ipa {
+	qcom,gsi-loader = "self";
+	memory-region = <&ipa_fw_mem>;
+	firmware-name = "qcom/sm8475/xiaomi/marble/ipa_fws.mdt";
+	status = "okay";
+};
+
+&remoteproc_mpss {
+	firmware-name = "qcom/sm8475/xiaomi/marble/modem.mdt";
+	status = "okay";
+};
+
+&remoteproc_slpi {
+	firmware-name = "qcom/sm8475/xiaomi/marble/slpi2.mdt";
+	status = "okay";
+};
+
+&i2c5 {
+	/*
+	 * i2c5's base pinctrl-0 (qup_i2c5_data_clk) lives under &tlmm, which is
+	 * disabled; with CONFIG_MODULES=y pinctrl core then returns -EPROBE_DEFER
+	 * forever, so the bus (and the eUSB2 repeater on it) never probes. Rely on
+	 * the bootloader mux (stock: gpio206/207 = qup5) instead.
+	 */
+	/delete-property/ pinctrl-names;
+	/delete-property/ pinctrl-0;
+	clock-frequency = <100000>;
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	qcom,shared;
+	status = "okay";
+
+	/*
+	 * PHONE_DUMP.md (2026-09-24): stock uses downstream compatible
+	 * "nxp,eusb2-repeater" (no mainline driver). Mainline driver for
+	 * this exact chip is "nxp,ptn3222" (drivers/phy/phy-nxp-ptn3222.c,
+	 * CONFIG_PHY_NXP_PTN3222=m). Without this, usb_1_hsphy's
+	 * "phys = <&nxp_eusb2_repeater>;" never resolves to a probed phy
+	 * provider, so it defers forever ("failed to get repeater").
+	 */
+	nxp_eusb2_repeater: redriver@4f {
+		compatible = "nxp,ptn3222";
+		reg = <0x4f>;
+		#phy-cells = <0>;
+		vdd1v8-supply = <&pm8350_s10>;
+		vdd3v3-supply = <&pm8350_l2>;
+		reset-gpios = <&pm8350c_gpios 7 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&eusb2_reset_ctrl_default>;
+	};
+
+	pm8008_i: pmic@8 {
+		compatible = "qcom,pm8008";
+		reg = <0x8>;
+
+		reset-gpios = <&tlmm 6 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pm8008i_active>;
+
+		vdd-l1-l2-supply = <&pm8350_s12>;
+		vdd-l3-l4-supply = <&pm8350c_bob>;
+		vdd-l5-supply = <&pm8350c_s1>;
+		vdd-l6-supply = <&pm8350c_bob>;
+		vdd-l7-supply = <&pm8350c_bob>;
+
+		regulators {
+			pm8008i_l1: ldo1 {
+				regulator-name = "pm8008i_l1";
+			};
+
+			pm8008i_l2: ldo2 {
+				regulator-name = "pm8008i_l2";
+			};
+
+			pm8008i_l3: ldo3 {
+				regulator-name = "pm8008i_l3";
+			};
+
+			pm8008i_l4: ldo4 {
+				regulator-name = "pm8008i_l4";
+			};
+
+			pm8008i_l5: ldo5 {
+				regulator-name = "pm8008i_l5";
+			};
+
+			pm8008i_l6: ldo6 {
+				regulator-name = "pm8008i_l6";
+			};
+
+			pm8008i_l7: ldo7 {
+				regulator-name = "pm8008i_l7";
+			};
+		};
+	};
+
+	pm8008_j: pmic@c {
+		compatible = "qcom,pm8008";
+		reg = <0xc>;
+
+		reset-gpios = <&tlmm 11 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pm8008j_active>;
+
+		vdd-l1-l2-supply = <&pm8350_s12>;
+		vdd-l3-l4-supply = <&pm8350c_bob>;
+		vdd-l5-supply = <&pm8350c_s1>;
+		vdd-l6-supply = <&pm8350c_bob>;
+		vdd-l7-supply = <&pm8350c_bob>;
+
+		regulators {
+			pm8008j_l1: ldo1 {
+				regulator-name = "pm8008j_l1";
+				regulator-min-microvolt = <1000000>;
+				regulator-max-microvolt = <1000000>;
+			};
+
+			pm8008j_l2: ldo2 {
+				regulator-name = "pm8008j_l2";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+			};
+
+			pm8008j_l3: ldo3 {
+				regulator-name = "pm8008j_l3";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+			};
+
+			pm8008j_l4: ldo4 {
+				regulator-name = "pm8008j_l4";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+			};
+
+			pm8008j_l5: ldo5 {
+				regulator-name = "pm8008j_l5";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+			};
+
+			pm8008j_l6: ldo6 {
+				regulator-name = "pm8008j_l6";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+			};
+
+			pm8008j_l7: ldo7 {
+				regulator-name = "pm8008j_l7";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+			};
+		};
+	};
+};
+
+&pm8350b_haptics {
+	qcom,vmax-microvolt = <1450000>;
+	qcom,lra-period-us = <5882>;
+	status = "okay";
+};
+
+&pm8350c_gpios {
+	eusb2_reset_ctrl_default: eusb2-reset-ctrl-default-state {
+		pins = "gpio7";
+		function = PMIC_GPIO_FUNC_NORMAL;
+		input-enable;
+		output-enable;
+		bias-disable;
+		power-source = <1>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_MED>;
+	};
+};
+
+&pm8350_gpios {
+	vol_up_n: vol-up-n-state {
+		pins = "gpio6";
+		function = PMIC_GPIO_FUNC_NORMAL;
+		input-enable;
+		bias-pull-up;
+		power-source = <1>;
+	};
+};
+
+&spi4 {
+	status = "okay";
+
+	touchscreen@0 {
+		compatible = "goodix,gt9916";
+		reg = <0>;
+
+		interrupt-parent = <&tlmm>;
+		interrupts = <21 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&tlmm 20 GPIO_ACTIVE_LOW>;
+
+		avdd-supply = <&pm8350c_l9>;
+		vddio-supply = <&pm8350c_l2>;
+
+		spi-max-frequency = <15000000>;
+
+		/*
+		 * The GT9916 firmware reports in 10x "super resolution" units
+		 * (captured max 10354/23125); stock sets the ABS range from the
+		 * IC's screen_max, not the 1080x2400 panel size.
+		 */
+		touchscreen-size-x = <10800>;
+		touchscreen-size-y = <24000>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&ts_int_n>, <&ts_reset_n>;
+	};
+};
+
+/*
+ * PHONE_DUMP.md (2026-09-24): the /delete-property/ iommus below (on
+ * qupv3_id_0, ufs_mem_hc, usb_1_dwc3) was backwards. Kernel config has
+ * CONFIG_ARM_SMMU_DISABLE_BYPASS_BY_DEFAULT=y, so a DMA-capable device
+ * with NO iommus entry matches no SMR when arm-smmu resets and gets
+ * FAULTED, not bypassed. Restored to the base sm8450.dtsi/sm8475.dtsi
+ * values (stock confirms UFS's stream ID 0xe0 is correct).
+ */
+&qupv3_id_0 {
+	status = "okay";
+};
+
+&qupv3_id_2 {
+	status = "okay";
+};
+
+&uart20 {
+	/* stock bt_qca6490 hs-uart @0x894000, wired as on sm8450-hdk */
+	pinctrl-0 = <&uart20_default>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	bluetooth {
+		compatible = "qcom,wcn6855-bt";
+
+		vddrfacmn-supply = <&vreg_pmu_rfa_cmn_0p8>;
+		vddaon-supply = <&vreg_pmu_aon_0p8>;
+		vddwlcx-supply = <&vreg_pmu_wlcx_0p8>;
+		vddwlmx-supply = <&vreg_pmu_wlmx_0p8>;
+		vddbtcmx-supply = <&vreg_pmu_btcmx_0p8>;
+		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
+		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
+		vddrfa1p8-supply = <&vreg_pmu_rfa_1p7>;
+	};
+};
+
+&ufs_mem_hc {
+	status = "okay";
+
+	/* reset-gpios (tlmm 210) omitted: tlmm is disabled, so it would defer ufshc forever */
+
+	vcc-supply = <&pm8350_l7>;
+	vcc-max-microamp = <1100000>;
+	vccq-supply = <&pm8350_l9>;
+	vccq-max-microamp = <1200000>;
+};
+
+&ufs_mem_phy {
+	status = "okay";
+
+	vdda-phy-supply = <&pm8350_l5>;
+	vdda-pll-supply = <&pm8350c_l10>;
+};
+
+&usb_1 {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+
+	qcom,select-utmi-as-pipe-clk;
+
+	/* v7.x: dwc3 core is flattened into the qcom glue node */
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
+
+	status = "okay";
+};
+
+&usb_1_hsphy {
+	status = "okay";
+
+	vdd-supply = <&pm8350_l5>;
+	vdda12-supply = <&pm8350c_l10>;
+	phys = <&nxp_eusb2_repeater>;
+};
+
+&tlmm {
+	/*
+	 * 2026-09-25: TLMM is readable from Linux (devmem over the USB shell:
+	 * gpio16 ctl @0xf110000 = 0x1, i2c5 pins gpio206/207 = 0x1807/qup5),
+	 * so the earlier "TrustZone blocks TLMM" theory was wrong. The two
+	 * old crashes were almost certainly gpiolib reading the secure-owned
+	 * pins when the gpiochip registered: stock marks 28-31 and 36-39 as
+	 * qcom,gpios-reserved, and every mainline sm8450 phone DT carries the
+	 * matching gpio-reserved-ranges, which this DT never had.
+	 * Register layout checked: base 0xf100000 + 0x1000*id matches the
+	 * downstream cape driver (0xf000000 + 0x100000 + 0x1000*id).
+	 */
+	compatible = "qcom,sm8475-tlmm";
+	gpio-reserved-ranges = <28 4>, <36 4>;
+
+	ts_reset_n: ts-reset-n-state {
+		pins = "gpio20";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-up;
+	};
+
+	ts_int_n: ts-int-n-state {
+		pins = "gpio21";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-up;
+	};
+
+	bt_en: bt-en-state {
+		pins = "gpio81";
+		function = "gpio";
+		drive-strength = <16>;
+		output-low;
+		bias-pull-down;
+	};
+
+	wlan_en: wlan-en-state {
+		pins = "gpio80";
+		function = "gpio";
+		drive-strength = <16>;
+		output-low;
+		bias-pull-down;
+	};
+
+	xo_clk_default: xo-clk-state {
+		pins = "gpio204";
+		function = "gpio";
+		drive-strength = <16>;
+		output-low;
+		bias-pull-down;
+	};
+
+	uart20_default: uart20-default-state {
+		cts-pins {
+			pins = "gpio76";
+			function = "qup20";
+			bias-disable;
+		};
+
+		rts-pins {
+			pins = "gpio77";
+			function = "qup20";
+			bias-disable;
+		};
+
+		rx-pins {
+			pins = "gpio78";
+			function = "qup20";
+			bias-disable;
+		};
+
+		tx-pins {
+			pins = "gpio79";
+			function = "qup20";
+			bias-disable;
+		};
+	};
+};
+
+/*
+ * v7.x sm8450.dtsi enables CoreSight/QDSS trace. Unused here, and the debug
+ * blocks may be locked by TZ on retail devices (reads can hang the SoC),
+ * so keep them off.
+ */
+&{/ete-0} {
+	status = "disabled";
+};
+
+&{/ete-1} {
+	status = "disabled";
+};
+
+&{/ete-2} {
+	status = "disabled";
+};
+
+&{/ete-3} {
+	status = "disabled";
+};
+
+&{/ete-4} {
+	status = "disabled";
+};
+
+&{/ete-5} {
+	status = "disabled";
+};
+
+&{/ete-6} {
+	status = "disabled";
+};
+
+&{/ete-7} {
+	status = "disabled";
+};
+
+&{/funnel-ete} {
+	status = "disabled";
+};
+
+&{/soc@0/cti@10c2a000} {
+	status = "disabled";
+};
+
+&{/soc@0/cti@10c2b000} {
+	status = "disabled";
+};
+
+&{/soc@0/cti@138e0000} {
+	status = "disabled";
+};
+
+&{/soc@0/cti@138f0000} {
+	status = "disabled";
+};
+
+&{/soc@0/cti@13900000} {
+	status = "disabled";
+};
+
+&{/soc@0/funnel@10041000} {
+	status = "disabled";
+};
+
+&{/soc@0/funnel@10042000} {
+	status = "disabled";
+};
+
+&{/soc@0/funnel@10045000} {
+	status = "disabled";
+};
+
+&{/soc@0/funnel@10b04000} {
+	status = "disabled";
+};
+
+&{/soc@0/funnel@10c2f000} {
+	status = "disabled";
+};
+
+&{/soc@0/funnel@13810000} {
+	status = "disabled";
+};
+
+&{/soc@0/replicator@10046000} {
+	status = "disabled";
+};
+
+&{/soc@0/replicator@1004e000} {
+	status = "disabled";
+};
+
+&{/soc@0/replicator@10b06000} {
+	status = "disabled";
+};
+
+&{/soc@0/stm@10002000} {
+	status = "disabled";
+};
+
+&{/soc@0/tmc@10048000} {
+	status = "disabled";
+};
+
+&{/soc@0/tmc@10b05000} {
+	status = "disabled";
+};
+
+&{/soc@0/tpda@10b08000} {
+	status = "disabled";
+};
+
+&{/soc@0/tpda@10c2e000} {
+	status = "disabled";
+};
+
+&{/soc@0/tpdm@10b09000} {
+	status = "disabled";
+};
+
+&{/soc@0/tpdm@10b0d000} {
+	status = "disabled";
+};
+
+&{/soc@0/tpdm@10c28000} {
+	status = "disabled";
+};
+
+&{/soc@0/tpdm@10c29000} {
+	status = "disabled";
+};
+
+/*
+ * Speakers: 2x Awinic AW88263S (register compatible with AW88261) on i2c15,
+ * fed by the tertiary TDM interface like stock ("TDM-LPAIF-RX-TERTIARY"),
+ * framed as I2S (2 x 32-bit slots, BCLK = 64 * fs) as set by the amp ACF.
+ * 0x34 = top (also the earpiece, see gpio52), 0x35 = bottom. Pins and gpios
+ * from the stock device tree.
+ */
+&i2c15 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	speaker_top: audio-codec@34 {
+		compatible = "awinic,aw88261";
+		reg = <0x34>;
+		#sound-dai-cells = <0>;
+		awinic,audio-channel = <0>;
+		awinic,sync-flag;
+		/* TDM slot layout comes from the stock ACF register profile */
+		awinic,keep-fw-i2s-config;
+		firmware-name = "qcom/sm8475/xiaomi/marble/aw88261_acf.bin";
+		sound-name-prefix = "Speaker Top";
+	};
+
+	speaker_bottom: audio-codec@35 {
+		compatible = "awinic,aw88261";
+		reg = <0x35>;
+		#sound-dai-cells = <0>;
+		awinic,audio-channel = <1>;
+		awinic,sync-flag;
+		/* TDM slot layout comes from the stock ACF register profile */
+		awinic,keep-fw-i2s-config;
+		firmware-name = "qcom/sm8475/xiaomi/marble/aw88261_acf.bin";
+		sound-name-prefix = "Speaker Bottom";
+	};
+};
+
+&tlmm {
+	/* The aw88261 driver has no reset-gpios support: keep both amps out of reset */
+	speaker-top-reset-hog {
+		gpio-hog;
+		gpios = <1 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "speaker-top-reset-n";
+	};
+
+	speaker-bottom-reset-hog {
+		gpio-hog;
+		gpios = <120 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "speaker-bottom-reset-n";
+	};
+
+	tert_mi2s_active: tert-mi2s-active-state {
+		sck-pins {
+			pins = "gpio121";
+			function = "mi2s2_sck";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		data0-pins {
+			pins = "gpio122";
+			function = "mi2s2_data0";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		ws-pins {
+			pins = "gpio123";
+			function = "mi2s2_ws";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		data1-pins {
+			pins = "gpio124";
+			function = "mi2s2_data1";
+			drive-strength = <8>;
+			bias-pull-down;
+		};
+	};
+};
+
+&sound {
+	compatible = "qcom,sm8450-sndcard";
+	model = "SM8475-Xiaomi-Marble";
+	speaker-earpiece-gpios = <&tlmm 52 GPIO_ACTIVE_HIGH>;
+
+	pinctrl-0 = <&tert_mi2s_active>;
+	pinctrl-names = "default";
+
+	/* Stock: qcom,mi2s-tdm-is-hw-vote-needed for the tertiary interface */
+	clocks = <&q6prmcc LPASS_HW_MACRO_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
+		 <&q6prmcc LPASS_CLK_ID_TER_TDM_IBIT LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
+	clock-names = "tdm-vote", "tdm-bclk";
+
+	/* Stock speaker TDM: 96 kHz, 4 x 32-bit slots, short frame sync */
+	qcom,tdm-slots = <4>;
+	qcom,tdm-slot-width = <32>;
+	qcom,tdm-rate = <96000>;
+	qcom,tdm-format = "dsp_a";
+
+	/* Analog mics on the WCD9385; ADCs feed the TX macro over SoundWire */
+	audio-routing = "AMIC1", "MIC BIAS1",
+			"AMIC2", "MIC BIAS2",
+			"AMIC3", "MIC BIAS3",
+			"AMIC4", "MIC BIAS3",
+			"TX SWR_INPUT0", "ADC1_OUTPUT",
+			"TX SWR_INPUT1", "ADC2_OUTPUT",
+			"TX SWR_INPUT0", "ADC3_OUTPUT",
+			"TX SWR_INPUT1", "ADC4_OUTPUT";
+
+	wcd-capture-dai-link {
+		link-name = "WCD Capture";
+
+		cpu {
+			sound-dai = <&q6apmbedai TX_CODEC_DMA_TX_3>;
+		};
+
+		codec {
+			sound-dai = <&wcd938x 1>, <&swr2 0>, <&txmacro 0>;
+		};
+
+		platform {
+			sound-dai = <&q6apm>;
+		};
+	};
+
+	speaker-dai-link {
+		link-name = "Speaker Playback";
+
+		cpu {
+			sound-dai = <&q6apmbedai TERTIARY_TDM_RX_0>;
+		};
+
+		codec {
+			sound-dai = <&speaker_top>, <&speaker_bottom>;
+		};
+
+		platform {
+			sound-dai = <&q6apm>;
+		};
+	};
+};
+
+&rxmacro {
+	status = "okay";
+};
+
+&txmacro {
+	status = "okay";
+};
+
+/* No DMICs on marble; VA macro only provides the fsgen clock to RX/TX macros */
+&vamacro {
+	vdd-micb-supply = <&pm8350_s10>;
+
+	status = "okay";
+};
+
+&swr1 {
+	status = "okay";
+
+	wcd_rx: codec@0,4 {
+		compatible = "sdw20217010d00";
+		reg = <0 4>;
+		qcom,rx-port-mapping = <1 2 3 4 5>;
+	};
+};
+
+&swr2 {
+	status = "okay";
+
+	wcd_tx: codec@0,3 {
+		compatible = "sdw20217010d00";
+		reg = <0 3>;
+		qcom,tx-port-mapping = <1 1 2 3>;
+	};
+};
+
+&tlmm {
+	wcd_default: wcd-reset-n-active-state {
+		pins = "gpio43";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-disable;
+		output-low;
+	};
+
+	pm8008i_active: pm8008i-active-state {
+		pins = "gpio6";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-high;
+	};
+
+	pm8008j_active: pm8008j-active-state {
+		pins = "gpio11";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-high;
+	};
+
+	cam_mclk1_default: cam-mclk1-default-state {
+		pins = "gpio101";
+		function = "cam_mclk";
+		drive-strength = <4>;
+		bias-disable;
+	};
+
+	cam_mclk1_suspend: cam-mclk1-suspend-state {
+		pins = "gpio101";
+		function = "cam_mclk";
+		drive-strength = <4>;
+		bias-pull-down;
+	};
+
+	cam_reset2_default: cam-reset2-default-state {
+		pins = "gpio24";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-high;
+	};
+
+	cam_reset2_suspend: cam-reset2-suspend-state {
+		pins = "gpio24";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+		output-low;
+	};
+};
+
+&cci0 {
+	status = "okay";
+};
+
+&cci0_i2c0 {
+	camera@1a {
+		compatible = "sony,imx355";
+		reg = <0x1a>;
+
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+
+		clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clock-rates = <19200000>;
+
+		reset-gpios = <&tlmm 24 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default", "suspend";
+		pinctrl-0 = <&cam_mclk1_default &cam_reset2_default>;
+		pinctrl-1 = <&cam_mclk1_suspend &cam_reset2_suspend>;
+
+		avdd-supply = <&pm8008j_l3>;
+		dvdd-supply = <&pm8008j_l2>;
+		dovdd-supply = <&pm8450_l4>;
+
+		port {
+			imx355_ep: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <360000000>;
+			};
+		};
+	};
+};
+
+&cci1 {
+	status = "okay";
+};
+
+/* === KGSL OVERRIDES === */
+&gpu {
+	compatible = "qcom,adreno-gpu-gen7-4-0", "qcom,kgsl-3d0";
+	qcom,chipid = <0x07030002>;
+	qcom,gpu-model = "Adreno725v1";
+	qcom,initial-pwrlevel = <5>;
+	qcom,no-nap;
+	qcom,min-access-length = <0x20>;
+	qcom,ubwc-mode = <0x04>;
+	qcom,tzone-names = "gpuss-0", "gpuss-1";
+	qcom,bus-table-ddr = <0x00 0xbebc2 0x1ae1b6 0x209a8e 0x28973c 0x2dc6c0 0x5caf6a 0x65ce03 0x7cb163 0xa3140c 0xbe7f17 0xc7acf1>;
+	/delete-property/ operating-points-v2;
+
+	qcom,gpu-pwrlevels {
+		compatible = "qcom,gpu-pwrlevels";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		qcom,gpu-pwrlevel@0 { reg = <0>; qcom,gpu-freq = <580000000>; qcom,level = <0x90>; qcom,bus-freq = <11>; qcom,bus-min = <7>; qcom,bus-max = <11>; qcom,acd-level = <0x882e5ffd>; qcom,cx-level = <0xc0>; };
+		qcom,gpu-pwrlevel@1 { reg = <1>; qcom,gpu-freq = <515000000>; qcom,level = <0x80>; qcom,bus-freq = <6>; qcom,bus-min = <6>; qcom,bus-max = <8>; qcom,acd-level = <0x882e5ffd>; qcom,cx-level = <0x80>; };
+		qcom,gpu-pwrlevel@2 { reg = <2>; qcom,gpu-freq = <439000000>; qcom,level = <0x60>; qcom,bus-freq = <6>; qcom,bus-min = <3>; qcom,bus-max = <8>; qcom,acd-level = <0xc0285ffd>; qcom,cx-level = <0x80>; };
+		qcom,gpu-pwrlevel@3 { reg = <3>; qcom,gpu-freq = <364000000>; qcom,level = <0x50>; qcom,bus-freq = <3>; qcom,bus-min = <1>; qcom,bus-max = <6>; qcom,acd-level = <0xc0285ffd>; qcom,cx-level = <0x80>; };
+		qcom,gpu-pwrlevel@4 { reg = <4>; qcom,gpu-freq = <324000000>; qcom,level = <0x40>; qcom,bus-freq = <2>; qcom,bus-min = <1>; qcom,bus-max = <6>; qcom,acd-level = <0xc02a5ffd>; qcom,cx-level = <0x40>; };
+		qcom,gpu-pwrlevel@5 { reg = <5>; qcom,gpu-freq = <285000000>; qcom,level = <0x38>; qcom,bus-freq = <2>; qcom,bus-min = <1>; qcom,bus-max = <5>; qcom,acd-level = <0xc02c5ffd>; qcom,cx-level = <0x40>; };
+		qcom,gpu-pwrlevel@6 { reg = <6>; qcom,gpu-freq = <220000000>; qcom,level = <0x30>; qcom,bus-freq = <2>; qcom,bus-min = <1>; qcom,bus-max = <5>; qcom,acd-level = <0xc8285ffd>; qcom,cx-level = <0x40>; };
+	};
+};
+
+&gmu {
+	compatible = "qcom,gen7-gmu";
+};
+
+&{/thermal-zones/gpu-top-thermal} {
+	cooling-maps {
+		/delete-node/ map0;
+	};
+};
+
+&{/thermal-zones/gpu-bottom-thermal} {
+	cooling-maps {
+		/delete-node/ map0;
+	};
+};
+/* === END KGSL OVERRIDES === */
