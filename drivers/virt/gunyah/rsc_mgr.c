@@ -518,6 +518,45 @@ static irqreturn_t gunyah_rm_tx(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/*
+ * Qualcomm firmware requires the message queue to be bound to its completion
+ * virq before the first transfer. The function ID lives in the HVC immediate,
+ * so every bind needs its own instruction.
+ */
+#define GUNYAH_RM_MSGQ_BIND(imm, capid)					\
+({									\
+	register u64 _x0 asm("x0") = (capid);				\
+	register u64 _x1 asm("x1") = 0;					\
+	register u64 _x2 asm("x2") = 0;					\
+	register u64 _x3 asm("x3") = 0;					\
+	register u64 _x4 asm("x4") = 0;					\
+	register u64 _x5 asm("x5") = 0;					\
+	register u64 _x6 asm("x6") = 0;					\
+	register u64 _x7 asm("x7") = 0;					\
+	asm volatile ("hvc #" #imm "\n"					\
+		: "+r"(_x0), "+r"(_x1), "+r"(_x2), "+r"(_x3),		\
+		  "+r"(_x4), "+r"(_x5), "+r"(_x6), "+r"(_x7)		\
+		: : "memory");						\
+	_x0;								\
+})
+
+static void gunyah_rm_bind_msgqs(struct gunyah_rm *rm)
+{
+	u64 ret;
+
+	ret = GUNYAH_RM_MSGQ_BIND(0x6017, rm->tx_ghrsc.capid);
+	pr_info("gunyah_rm: msgq bind TX cap=%#llx ret=%#llx\n",
+		rm->tx_ghrsc.capid, ret);
+
+	/*
+	 * 0x6018 is only believed to be the receive-side bind; the return
+	 * value is logged so we can tell whether it is the right call.
+	 */
+	ret = GUNYAH_RM_MSGQ_BIND(0x6018, rm->rx_ghrsc.capid);
+	pr_info("gunyah_rm: msgq bind RX cap=%#llx ret=%#llx\n",
+		rm->rx_ghrsc.capid, ret);
+}
+
 static int gunyah_rm_msgq_send(struct gunyah_rm *rm, size_t size, bool push)
 {
 	const u64 tx_flags = push ? GUNYAH_HYPERCALL_MSGQ_TX_FLAGS_PUSH : 0;
@@ -529,28 +568,6 @@ static int gunyah_rm_msgq_send(struct gunyah_rm *rm, size_t size, bool push)
 
 again:
 	wait_for_completion(&rm->send_ready);
-
-	/* one-time: bind TX queue for Qualcomm firmware */
-	{
-		static bool bound;
-		if (!bound) {
-			register u64 _x0 asm("x0") = rm->tx_ghrsc.capid;
-			register u64 _x1 asm("x1") = 0;
-			register u64 _x2 asm("x2") = 0;
-			register u64 _x3 asm("x3") = 0;
-			register u64 _x4 asm("x4") = 0;
-			register u64 _x5 asm("x5") = 0;
-			register u64 _x6 asm("x6") = 0;
-			register u64 _x7 asm("x7") = 0;
-			asm volatile ("hvc #0x6017\n"
-				: "+r"(_x0), "+r"(_x1), "+r"(_x2), "+r"(_x3),
-				  "+r"(_x4), "+r"(_x5), "+r"(_x6), "+r"(_x7)
-				: : "memory");
-			pr_info("gunyah_rm: msgq_bind_send capid=0x%llx ret=%llx\n",
-				rm->tx_ghrsc.capid, (u64)_x0);
-			bound = true;
-		}
-	}
 
 	gunyah_error = gunyah_hypercall_msgq_send(rm->tx_ghrsc.capid, size,
 						  data, tx_flags, &ready);
@@ -839,7 +856,10 @@ static int gunyah_rm_get_of_info(struct gunyah_rm *rm)
 		return -EINVAL;
 	rm->rx_ghrsc.irq = ret;
 
-	of_node_put(rm_np);
+	pr_info("gunyah_rm: using DT node %pOF under %pOF: tx=%#llx rx=%#llx irq=%d/%d\n",
+		rm_np, gunyah_np, rm->tx_ghrsc.capid, rm->rx_ghrsc.capid,
+		rm->tx_ghrsc.irq, rm->rx_ghrsc.irq);
+
 	return 0;
 }
 
@@ -985,6 +1005,8 @@ static int __init gunyah_rm_init(void)
 					 "gunyah_rm_rx", rm);
 	if (ret)
 		goto free_tx_irq;
+
+	gunyah_rm_bind_msgqs(rm);
 
 	rm->miscdev.name = "gunyah";
 	rm->miscdev.minor = MISC_DYNAMIC_MINOR;

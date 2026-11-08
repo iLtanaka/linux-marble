@@ -55,8 +55,14 @@
 			compatible = "gunyah-resource-manager";
 			interrupts = <GIC_SPI 928 IRQ_TYPE_EDGE_RISING>,
 				     <GIC_SPI 929 IRQ_TYPE_EDGE_RISING>;
-			reg = <0x616c7743 0xf1f3267e>,
-			      <0x616c7743 0xf1f30f32>;
+			/*
+			 * TX/RX message-queue cap IDs seen on the live device.
+			 * They are runtime values (the hypervisor may inject its
+			 * own /hypervisor node), so treat this as a fallback and
+			 * check the "using DT node" log after boot.
+			 */
+			reg = <0x025380b5 0x69faf252>,
+			      <0x025380b5 0x69fa01cb>;
 			qcom,is-full-duplex;
 			qcom,free-irq-start = <960>;
 			qcom,tx-message-size = <240>;
