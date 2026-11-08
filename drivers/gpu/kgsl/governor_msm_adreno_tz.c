@@ -682,3 +682,6 @@ void msm_adreno_tz_exit(void)
 	if (ret)
 		pr_err(TAG "failed to remove governor %d\n", ret);
 }
+MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL v2");
+MODULE_DESCRIPTION("MSM Adreno TZ Governor");
