@@ -2636,7 +2636,13 @@ static int kgsl_iommu_setup_context(struct kgsl_mmu *mmu,
 		goto err_node_put;
 	}
 
+	/* Fix drvdata race condition for arm-smmu-qcom */
+	memset(&context->adreno_smmu, 0, sizeof(context->adreno_smmu));
+	void *kgsl_drvdata = dev_get_drvdata(&pdev->dev);
+	dev_set_drvdata(&pdev->dev, &context->adreno_smmu);
+
 	ret = of_dma_configure(&pdev->dev, node, true);
+	dev_set_drvdata(&pdev->dev, kgsl_drvdata);
 	if (ret)
 		goto err_device_put;
 
@@ -2757,7 +2763,13 @@ static int iommu_probe_secure_context(struct kgsl_device *device,
 		goto err_node_put;
 	}
 
+	/* Fix drvdata race condition for arm-smmu-qcom */
+	memset(&context->adreno_smmu, 0, sizeof(context->adreno_smmu));
+	void *kgsl_drvdata = dev_get_drvdata(&pdev->dev);
+	dev_set_drvdata(&pdev->dev, &context->adreno_smmu);
+
 	ret = of_dma_configure(&pdev->dev, node, true);
+	dev_set_drvdata(&pdev->dev, kgsl_drvdata);
 	if (ret)
 		goto err_device_put;
 
@@ -2910,7 +2922,13 @@ static int kgsl_iommu_setup_context_standard(struct kgsl_mmu *mmu,
 		goto err_node_put;
 	}
 
+	/* Fix drvdata race condition for arm-smmu-qcom */
+	memset(&context->adreno_smmu, 0, sizeof(context->adreno_smmu));
+	void *kgsl_drvdata = dev_get_drvdata(&pdev->dev);
+	dev_set_drvdata(&pdev->dev, &context->adreno_smmu);
+
 	ret = of_dma_configure(&pdev->dev, node, true);
+	dev_set_drvdata(&pdev->dev, kgsl_drvdata);
 	if (ret)
 		goto err_device_put;
 
