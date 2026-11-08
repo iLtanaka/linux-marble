@@ -538,6 +538,8 @@ const struct csid_format_info *csid_get_fmt_entry(const struct csid_format_info 
  */
 static int csid_set_clock_rates(struct csid_device *csid)
 {
+	if (camss_dbg_skip & 32)
+		return 0;
 	struct device *dev = csid->camss->dev;
 	const struct csid_format_info *fmt;
 	s64 link_freq;
@@ -725,6 +727,7 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
 
 		enable_irq(csid->irq);
 
+		if (!(camss_dbg_skip & 2)) {
 		ret = csid->res->hw_ops->reset(csid);
 		if (ret < 0) {
 			disable_irq(csid->irq);
@@ -736,6 +739,7 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
 		}
 
 		csid->res->hw_ops->hw_version(csid);
+		}
 	} else {
 		disable_irq(csid->irq);
 		camss_disable_clocks(csid->nclocks, csid->clock);
@@ -1292,6 +1296,7 @@ static int csid_link_setup(struct media_entity *entity,
 			lane_cfg = &csiphy->cfg.csi2->lane_cfg;
 			csid->phy.lane_cnt = lane_cfg->num_data;
 			csid->phy.lane_assign = csid_get_lane_assign(lane_cfg, lane_cfg->num_data);
+			csid->phy.cphy = lane_cfg->cphy;
 			csid->tpg_linked = false;
 		}
 	}

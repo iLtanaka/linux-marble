@@ -234,6 +234,17 @@ static int video_check_format(struct camss_video *video)
 	return 0;
 }
 
+/*
+ * DEBUG (marble bisect): 0 = full stream, 1 = power-up only, N>1 = also run
+ * the first N-1 s_stream(1) calls (vfe, csid, csiphy, sensor) then bail out.
+ */
+static int stream_stage;
+module_param(stream_stage, int, 0644);
+
+/* DEBUG: 1 vfe reset/version, 2 csid reset/version, 4 csiphy reset/version, 8 all camss clock enables, 16 vfe IFE GDSC link, 32 clock rate setting */
+int camss_dbg_skip;
+module_param(camss_dbg_skip, int, 0644);
+
 static int video_prepare_streaming(struct vb2_queue *q)
 {
 	struct camss_video *video = vb2_get_drv_priv(q);
@@ -246,6 +257,12 @@ static int video_prepare_streaming(struct vb2_queue *q)
 			ret);
 	}
 
+	if (!ret && stream_stage == 1) {
+		dev_info(video->camss->dev, "stage 1: pipeline powered up OK\n");
+		v4l2_pipeline_pm_put(&vdev->entity);
+		return -ECANCELED;
+	}
+
 	return ret;
 }
 
@@ -256,6 +273,8 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 	struct media_entity *entity;
 	struct media_pad *pad;
 	struct v4l2_subdev *subdev;
+	struct v4l2_subdev *started[8];
+	int nstarted = 0;
 	int ret;
 
 	ret = video_device_pipeline_alloc_start(vdev);
@@ -281,12 +300,26 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 		entity = pad->entity;
 		subdev = media_entity_to_v4l2_subdev(entity);
 
+		if (stream_stage > 1 && nstarted >= stream_stage - 1) {
+			dev_info(video->camss->dev, "stage %d: stopping before %s\n",
+				 stream_stage, subdev->name);
+			ret = -ECANCELED;
+			goto unwind;
+		}
+
+		dev_info(video->camss->dev, "s_stream(1) %s\n", subdev->name);
 		ret = v4l2_subdev_call(subdev, video, s_stream, 1);
 		if (ret < 0 && ret != -ENOIOCTLCMD)
-			goto error;
+			goto unwind;
+		if (nstarted < ARRAY_SIZE(started))
+			started[nstarted++] = subdev;
 	}
 
 	return 0;
+
+unwind:
+	while (nstarted--)
+		v4l2_subdev_call(started[nstarted], video, s_stream, 0);
 
 error:
 	video_device_pipeline_stop(vdev);

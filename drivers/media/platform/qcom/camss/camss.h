@@ -97,6 +97,7 @@ enum camss_version {
 	CAMSS_8650,
 	CAMSS_8775P,
 	CAMSS_X1E80100,
+	CAMSS_8475,
 };
 
 enum icc_count {
@@ -120,6 +121,8 @@ struct camss_resources {
 	const unsigned int csid_num;
 	const unsigned int vfe_num;
 };
+
+extern int camss_dbg_skip;
 
 struct camss {
 	struct v4l2_device v4l2_dev;

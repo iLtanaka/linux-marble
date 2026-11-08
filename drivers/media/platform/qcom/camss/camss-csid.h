@@ -68,6 +68,7 @@ struct csid_phy_config {
 	u8 csiphy_id;
 	u8 lane_cnt;
 	u32 lane_assign;
+	bool cphy;
 	u32 en_vc;
 	u8 need_vc_update;
 };

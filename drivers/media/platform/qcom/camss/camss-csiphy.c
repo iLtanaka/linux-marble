@@ -136,6 +136,8 @@ static u8 csiphy_get_bpp(const struct csiphy_format_info *formats,
  */
 static int csiphy_set_clock_rates(struct csiphy_device *csiphy)
 {
+	if (camss_dbg_skip & 32)
+		return 0;
 	struct device *dev = csiphy->camss->dev;
 	s64 link_freq;
 	int i, j;
@@ -237,9 +239,11 @@ static int csiphy_set_power(struct v4l2_subdev *sd, int on)
 
 		enable_irq(csiphy->irq);
 
-		csiphy->res->hw_ops->reset(csiphy);
+		if (!(camss_dbg_skip & 4)) {
+			csiphy->res->hw_ops->reset(csiphy);
 
-		csiphy->res->hw_ops->hw_version_read(csiphy, dev);
+			csiphy->res->hw_ops->hw_version_read(csiphy, dev);
+		}
 	} else {
 		disable_irq(csiphy->irq);
 

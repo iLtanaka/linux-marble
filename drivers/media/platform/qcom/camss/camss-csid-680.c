@@ -200,6 +200,8 @@ static void __csid_configure_rx(struct csid_device *csid,
 	} else {
 		val |= (phy->csiphy_id + CSI2_RX_CFG0_PHY_SEL_BASE_IDX)
 			<< CSI2_RX_CFG0_PHY_NUM_SEL;
+		if (phy->cphy)
+			val |= BIT(CSI2_RX_CFG0_PHY_TYPE_SEL);
 	}
 
 	writel(val, csid->base + CSID_CSI2_RX_CFG0);

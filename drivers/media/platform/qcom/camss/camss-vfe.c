@@ -354,6 +354,7 @@ static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
 	case CAMSS_8650:
 	case CAMSS_8775P:
 	case CAMSS_X1E80100:
+	case CAMSS_8475:
 		switch (sink_code) {
 		case MEDIA_BUS_FMT_YUYV8_1X16:
 		{
@@ -878,7 +879,7 @@ void vfe_isr_reset_ack(struct vfe_device *vfe)
  */
 void vfe_pm_domain_off(struct vfe_device *vfe)
 {
-	if (!vfe->genpd)
+	if (!vfe->genpd || !vfe->genpd_link)
 		return;
 
 	device_link_del(vfe->genpd_link);
@@ -893,7 +894,7 @@ int vfe_pm_domain_on(struct vfe_device *vfe)
 {
 	struct camss *camss = vfe->camss;
 
-	if (!vfe->genpd)
+	if (!vfe->genpd || (camss_dbg_skip & 16))
 		return 0;
 
 	vfe->genpd_link = device_link_add(camss->dev, vfe->genpd,
@@ -946,6 +947,8 @@ static bool vfe_check_clock_levels(struct camss_clock *clock)
  */
 static int vfe_set_clock_rates(struct vfe_device *vfe)
 {
+	if (camss_dbg_skip & 32)
+		return 0;
 	struct device *dev = vfe->camss->dev;
 	u64 pixel_clock[VFE_LINE_NUM_MAX];
 	int i, j;
@@ -1077,6 +1080,51 @@ static int vfe_check_clock_rates(struct vfe_device *vfe)
 }
 
 /*
+ * Bus/CPAS clocks that stock Android enables before the IFE GDSC (CAMNOC,
+ * CPAS and AHB). Turning the IFE GDSC on without them hangs the SoC.
+ */
+static bool vfe_clock_is_bus(const char *name)
+{
+	static const char * const bus[] = {
+		"gcc_axi_hf", "gcc_axi_sf", "cpas_ahb", "core_ahb",
+		"cpas_fast_ahb", "camnoc_axi", "camnoc_rt_axi", "camnoc_nrt_axi",
+		"qdss_debug_xo",
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(bus); i++)
+		if (!strcmp(name, bus[i]))
+			return true;
+	return false;
+}
+
+/* Enable (bus=true) the bus clocks or (bus=false) all the others */
+static int vfe_enable_clocks_sel(struct vfe_device *vfe, bool bus)
+{
+	int i, ret;
+
+	if (camss_dbg_skip & 8)
+		return 0;
+
+	for (i = 0; i < vfe->nclocks; i++) {
+		if (vfe_clock_is_bus(vfe->clock[i].name) != bus)
+			continue;
+		ret = clk_prepare_enable(vfe->clock[i].clk);
+		if (ret) {
+			dev_err(vfe->camss->dev, "clock %s enable failed: %d\n",
+				vfe->clock[i].name, ret);
+			goto err;
+		}
+	}
+	return 0;
+err:
+	while (--i >= 0)
+		if (vfe_clock_is_bus(vfe->clock[i].name) == bus)
+			clk_disable_unprepare(vfe->clock[i].clk);
+	return ret;
+}
+
+/*
  * vfe_get - Power up and reset VFE module
  * @vfe: VFE Device
  *
@@ -1089,32 +1137,39 @@ int vfe_get(struct vfe_device *vfe)
 	mutex_lock(&vfe->power_lock);
 
 	if (vfe->power_count == 0) {
-		ret = vfe->res->hw_ops->pm_domain_on(vfe);
-		if (ret < 0)
-			goto error_pm_domain;
-
+		/* Same order as stock: TITAN_TOP, bus clocks, IFE GDSC, IFE clocks */
 		ret = pm_runtime_resume_and_get(vfe->camss->dev);
 		if (ret < 0)
-			goto error_domain_off;
+			goto error_pm_domain;
 
 		ret = vfe_set_clock_rates(vfe);
 		if (ret < 0)
 			goto error_pm_runtime_get;
 
-		ret = camss_enable_clocks(vfe->nclocks, vfe->clock,
-					  vfe->camss->dev);
+		ret = vfe_enable_clocks_sel(vfe, true);
 		if (ret < 0)
 			goto error_pm_runtime_get;
 
-		ret = vfe_reset(vfe);
+		ret = vfe->res->hw_ops->pm_domain_on(vfe);
 		if (ret < 0)
-			goto error_reset;
+			goto error_bus_clocks;
+
+		ret = vfe_enable_clocks_sel(vfe, false);
+		if (ret < 0)
+			goto error_domain_off;
+
+		if (!(camss_dbg_skip & 1)) {
+			ret = vfe_reset(vfe);
+			if (ret < 0)
+				goto error_reset;
+		}
 
 		vfe_reset_output_maps(vfe);
 
 		vfe_init_outputs(vfe);
 
-		vfe->res->hw_ops->hw_version(vfe);
+		if (!(camss_dbg_skip & 1))
+			vfe->res->hw_ops->hw_version(vfe);
 	} else {
 		ret = vfe_check_clock_rates(vfe);
 		if (ret < 0)
@@ -1128,11 +1183,24 @@ int vfe_get(struct vfe_device *vfe)
 
 error_reset:
 	camss_disable_clocks(vfe->nclocks, vfe->clock);
+	goto error_domain_off_nc;
 
-error_pm_runtime_get:
-	pm_runtime_put_sync(vfe->camss->dev);
 error_domain_off:
 	vfe->res->hw_ops->pm_domain_off(vfe);
+error_bus_clocks:
+	if (!(camss_dbg_skip & 8)) {
+		int i;
+
+		for (i = vfe->nclocks - 1; i >= 0; i--)
+			if (vfe_clock_is_bus(vfe->clock[i].name))
+				clk_disable_unprepare(vfe->clock[i].clk);
+	}
+error_pm_runtime_get:
+	pm_runtime_put_sync(vfe->camss->dev);
+	goto error_pm_domain;
+error_domain_off_nc:
+	vfe->res->hw_ops->pm_domain_off(vfe);
+	pm_runtime_put_sync(vfe->camss->dev);
 
 error_pm_domain:
 	mutex_unlock(&vfe->power_lock);
@@ -2014,6 +2082,7 @@ static int vfe_bpl_align_rdi(struct vfe_device *vfe)
 	case CAMSS_8650:
 	case CAMSS_8775P:
 	case CAMSS_X1E80100:
+	case CAMSS_8475:
 		ret = 16;
 		break;
 	default:
