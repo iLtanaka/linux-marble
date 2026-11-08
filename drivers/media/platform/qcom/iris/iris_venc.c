@@ -531,6 +531,14 @@ static int iris_venc_set_vpu2_props(struct iris_inst *inst)
 	int ret;
 
 	for (i = 0; i < ARRAY_SIZE(iris_venc_vpu2_props); i++) {
+		/*
+		 * BLUR_TYPES was captured from an AVC session. With HEVC and CBR rate
+		 * control it makes the firmware overshoot the target ~5x and drop 2 of
+		 * every 3 frames (zero-length buffers), so leave it at its default.
+		 */
+		if (inst->codec == V4L2_PIX_FMT_HEVC && iris_venc_vpu2_props[i].id == 0x0300014e)
+			continue;
+
 		val = iris_venc_vpu2_props[i].value;
 		ret = hfi_ops->session_set_property(inst, iris_venc_vpu2_props[i].id,
 						   HFI_HOST_FLAGS_NONE,
