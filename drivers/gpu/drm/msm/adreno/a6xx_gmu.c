@@ -3,6 +3,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/clk.h>
+#include <linux/component.h>
 #include <linux/firmware/qcom/qcom_scm.h>
 #include <linux/interconnect.h>
 #include <linux/of_platform.h>
@@ -2108,7 +2109,7 @@ void a6xx_gmu_sysprof_setup(struct msm_gpu *gpu, bool force_on)
 	pm_runtime_put(&gpu->pdev->dev);
 }
 
-void a6xx_gmu_remove(struct a6xx_gpu *a6xx_gpu)
+static void a6xx_gmu_destroy(struct a6xx_gpu *a6xx_gpu)
 {
 	struct adreno_gpu *adreno_gpu = &a6xx_gpu->base;
 	struct a6xx_gmu *gmu = &a6xx_gpu->gmu;
@@ -2188,7 +2189,8 @@ static void __iomem *a6xx_gmu_get_mmio(struct platform_device *pdev, resource_si
 	return ret;
 }
 
-int a6xx_gmu_wrapper_init(struct a6xx_gpu *a6xx_gpu, struct device_node *node)
+static int a6xx_gmu_wrapper_pdev_bind(struct a6xx_gpu *a6xx_gpu,
+				      struct device_node *node)
 {
 	struct platform_device *pdev = of_find_device_by_node(node);
 	struct adreno_gpu *adreno_gpu = &a6xx_gpu->base;
@@ -2241,7 +2243,8 @@ int a6xx_gmu_wrapper_init(struct a6xx_gpu *a6xx_gpu, struct device_node *node)
 		goto err_mmio;
 	}
 
-	if (!device_link_add(gmu->dev, gmu->cxpd, DL_FLAG_PM_RUNTIME)) {
+	if (!device_link_add(gmu->dev, gmu->cxpd,
+			     DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME)) {
 		ret = -ENODEV;
 		goto detach_cxpd;
 	}
@@ -2257,6 +2260,7 @@ int a6xx_gmu_wrapper_init(struct a6xx_gpu *a6xx_gpu, struct device_node *node)
 		goto err_mmio;
 	}
 
+	mutex_init(&gmu->lock);
 	gmu->initialized = true;
 
 	return 0;
@@ -2274,7 +2278,8 @@ err_clk:
 	return ret;
 }
 
-int a6xx_gmu_init(struct a6xx_gpu *a6xx_gpu, struct device_node *node)
+static int a6xx_gmu_pdev_bind(struct a6xx_gpu *a6xx_gpu,
+			      struct device_node *node)
 {
 	struct platform_device *pdev = of_find_device_by_node(node);
 	struct adreno_gpu *adreno_gpu = &a6xx_gpu->base;
@@ -2427,7 +2432,8 @@ int a6xx_gmu_init(struct a6xx_gpu *a6xx_gpu, struct device_node *node)
 		goto err_mmio;
 	}
 
-	link = device_link_add(gmu->dev, gmu->cxpd, DL_FLAG_PM_RUNTIME);
+	link = device_link_add(gmu->dev, gmu->cxpd,
+			       DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME);
 	if (!link) {
 		ret = -ENODEV;
 		goto detach_cxpd;
@@ -2463,6 +2469,7 @@ int a6xx_gmu_init(struct a6xx_gpu *a6xx_gpu, struct device_node *node)
 	/* Initialize RPMh */
 	a6xx_gmu_rpmh_init(gmu);
 
+	mutex_init(&gmu->lock);
 	gmu->initialized = true;
 
 	return 0;
@@ -2491,4 +2498,67 @@ err_put_device:
 	put_device(gmu->dev);
 
 	return ret;
+}
+
+static int a6xx_gmu_bind(struct device *dev, struct device *master, void *data)
+{
+	int (*bind)(struct a6xx_gpu *a6xx_gpu, struct device_node *node) =
+		(void *)of_device_get_match_data(dev);
+	struct a6xx_gpu *a6xx_gpu = dev_get_drvdata(dev);
+
+	if (WARN_ON(!a6xx_gpu))
+		return -ENODEV;
+
+	return bind(a6xx_gpu, dev->of_node);
+}
+
+static void a6xx_gmu_unbind(struct device *dev, struct device *master,
+			    void *data)
+{
+	struct a6xx_gpu *a6xx_gpu = dev_get_drvdata(dev);
+
+	a6xx_gmu_destroy(a6xx_gpu);
+	dev_set_drvdata(dev, NULL);
+}
+
+static const struct component_ops a6xx_gmu_component_ops = {
+	.bind = a6xx_gmu_bind,
+	.unbind = a6xx_gmu_unbind,
+};
+
+static int adreno_gmu_probe(struct platform_device *pdev)
+{
+	return component_add(&pdev->dev, &a6xx_gmu_component_ops);
+}
+
+static void adreno_gmu_remove(struct platform_device *pdev)
+{
+	component_del(&pdev->dev, &a6xx_gmu_component_ops);
+}
+
+static const struct of_device_id adreno_gmu_match_table[] = {
+	{ .compatible = "qcom,adreno-gmu", .data = a6xx_gmu_pdev_bind },
+	{ .compatible = "qcom,adreno-rgmu", .data = a6xx_gmu_wrapper_pdev_bind },
+	{ .compatible = "qcom,adreno-gmu-wrapper", .data = a6xx_gmu_wrapper_pdev_bind },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, adreno_gmu_match_table);
+
+static struct platform_driver adreno_gmu_driver = {
+	.probe = adreno_gmu_probe,
+	.remove = adreno_gmu_remove,
+	.driver = {
+		.name = "adreno_gmu",
+		.of_match_table = adreno_gmu_match_table,
+	},
+};
+
+void __init adreno_gmu_register(void)
+{
+	platform_driver_register(&adreno_gmu_driver);
+}
+
+void __exit adreno_gmu_unregister(void)
+{
+	platform_driver_unregister(&adreno_gmu_driver);
 }

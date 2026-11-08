@@ -271,15 +271,21 @@ static const struct component_ops a3xx_ops = {
 
 static int adreno_probe(struct platform_device *pdev)
 {
+	int ret;
+
 	/*
 	 * Standalone GPU DRM device (separate_gpu_kms, or unrecognized GPU
 	 * owned by another driver like KGSL): msm_gpu_probe() registers its
-	 * own DRM and takes ownership. We must NOT also component_add().
+	 * own DRM, and the GPU/GMU are bound to it through the component
+	 * framework.
 	 */
 	if (of_device_is_compatible(pdev->dev.of_node, "amd,imageon") ||
 	    (msm_separate_gpu_kms_components() &&
-	     adreno_has_gpu(pdev->dev.of_node)))
-		return msm_gpu_probe(pdev, &a3xx_ops);
+	     adreno_has_gpu(pdev->dev.of_node))) {
+		ret = msm_gpu_probe(pdev);
+		if (ret)
+			return ret;
+	}
 
 	return component_add(&pdev->dev, &a3xx_ops);
 }
@@ -288,10 +294,12 @@ static void adreno_remove(struct platform_device *pdev)
 {
 	if (of_device_is_compatible(pdev->dev.of_node, "amd,imageon") ||
 	    (msm_separate_gpu_kms_components() &&
-	     adreno_has_gpu(pdev->dev.of_node)))
-		msm_gpu_remove(pdev, &a3xx_ops);
-	else
+	     adreno_has_gpu(pdev->dev.of_node))) {
 		component_del(&pdev->dev, &a3xx_ops);
+		msm_gpu_remove(pdev);
+	} else {
+		component_del(&pdev->dev, &a3xx_ops);
+	}
 }
 
 static void adreno_shutdown(struct platform_device *pdev)
@@ -434,6 +442,7 @@ void __init adreno_register(void)
 		return;
 
 	platform_driver_register(&adreno_driver);
+	adreno_gmu_register();
 }
 
 void __exit adreno_unregister(void)
@@ -441,5 +450,6 @@ void __exit adreno_unregister(void)
 	if (skip_gpu)
 		return;
 
+	adreno_gmu_unregister();
 	platform_driver_unregister(&adreno_driver);
 }

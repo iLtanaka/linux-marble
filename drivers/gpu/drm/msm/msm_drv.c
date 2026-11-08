@@ -1073,14 +1073,21 @@ bool msm_separate_gpu_kms_components(void)
 static int add_gpu_components(struct device *dev,
 			      struct component_match **matchptr)
 {
-	struct device_node *np;
+	struct device_node *np, *gmu_np;
 
 	np = of_find_matching_node(NULL, msm_gpu_match);
 	if (!np)
 		return 0;
 
-	if (of_device_is_available(np) && adreno_has_gpu(np))
+	if (of_device_is_available(np) && adreno_has_gpu(np)) {
 		drm_of_component_match_add(dev, matchptr, component_compare_of, np);
+
+		gmu_np = of_parse_phandle(np, "qcom,gmu", 0);
+		if (gmu_np && of_device_is_available(gmu_np))
+			drm_of_component_match_add(dev, matchptr,
+						   component_compare_of, gmu_np);
+		of_node_put(gmu_np);
+	}
 
 	of_node_put(np);
 
@@ -1149,10 +1156,25 @@ int msm_drv_probe(struct device *master_dev,
 	return 0;
 }
 
-int msm_gpu_probe(struct platform_device *pdev,
-		  const struct component_ops *ops)
+static int msm_gpu_drm_bind(struct device *dev)
+{
+	return msm_drm_init(dev, &msm_gpu_driver, NULL);
+}
+
+static void msm_gpu_drm_unbind(struct device *dev)
+{
+	msm_drm_uninit(dev, NULL);
+}
+
+static const struct component_master_ops msm_gpu_ops = {
+	.bind = msm_gpu_drm_bind,
+	.unbind = msm_gpu_drm_unbind,
+};
+
+int msm_gpu_probe(struct platform_device *pdev)
 {
 	struct msm_drm_private *priv;
+	struct component_match *match = NULL;
 	int ret;
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
@@ -1161,6 +1183,10 @@ int msm_gpu_probe(struct platform_device *pdev,
 
 	platform_set_drvdata(pdev, priv);
 
+	ret = add_gpu_components(&pdev->dev, &match);
+	if (ret)
+		return ret;
+
 	/* on all devices that I am aware of, iommu's which can map
 	 * any address the cpu can see are used:
 	 */
@@ -1168,13 +1194,12 @@ int msm_gpu_probe(struct platform_device *pdev,
 	if (ret)
 		return ret;
 
-	return msm_drm_init(&pdev->dev, &msm_gpu_driver, ops);
+	return component_master_add_with_match(&pdev->dev, &msm_gpu_ops, match);
 }
 
-void msm_gpu_remove(struct platform_device *pdev,
-		    const struct component_ops *ops)
+void msm_gpu_remove(struct platform_device *pdev)
 {
-	msm_drm_uninit(&pdev->dev, ops);
+	component_master_del(&pdev->dev, &msm_gpu_ops);
 }
 
 static int __init msm_drm_register(void)

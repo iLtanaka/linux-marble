@@ -759,6 +759,8 @@ struct msm_gpu *adreno_load_gpu(struct drm_device *dev);
 bool adreno_has_gpu(struct device_node *node);
 void __init adreno_register(void);
 void __exit adreno_unregister(void);
+void __init adreno_gmu_register(void);
+void __exit adreno_gmu_unregister(void);
 
 static inline void msm_submitqueue_put(struct msm_gpu_submitqueue *queue)
 {

@@ -11,6 +11,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/devfreq.h>
+#include <linux/of_platform.h>
 #include <linux/pm_domain.h>
 #include <linux/soc/qcom/llcc-qcom.h>
 
@@ -2297,6 +2298,8 @@ static void a6xx_destroy(struct msm_gpu *gpu)
 {
 	struct adreno_gpu *adreno_gpu = to_adreno_gpu(gpu);
 	struct a6xx_gpu *a6xx_gpu = to_a6xx_gpu(adreno_gpu);
+	struct platform_device *gmu_pdev;
+	struct device_node *node;
 
 	if (a6xx_gpu->sqe_bo) {
 		msm_gem_unpin_iova(a6xx_gpu->sqe_bo, gpu->vm);
@@ -2315,7 +2318,16 @@ static void a6xx_destroy(struct msm_gpu *gpu)
 
 	a6xx_llc_slices_destroy(a6xx_gpu);
 
-	a6xx_gmu_remove(a6xx_gpu);
+	node = of_parse_phandle(gpu->pdev->dev.of_node, "qcom,gmu", 0);
+	if (node) {
+		gmu_pdev = of_find_device_by_node(node);
+		if (gmu_pdev) {
+			if (platform_get_drvdata(gmu_pdev) == a6xx_gpu)
+				platform_set_drvdata(gmu_pdev, NULL);
+			put_device(&gmu_pdev->dev);
+		}
+		of_node_put(node);
+	}
 
 	adreno_gpu_cleanup(adreno_gpu);
 
@@ -2666,6 +2678,7 @@ static struct msm_gpu *a6xx_gpu_init(struct drm_device *dev)
 	struct device_node *phandle;
 	struct a6xx_gpu *a6xx_gpu;
 	struct adreno_gpu *adreno_gpu;
+	struct platform_device *gmu_pdev;
 	struct msm_gpu *gpu;
 	extern int enable_preemption;
 	u32 speedbin;
@@ -2693,16 +2706,16 @@ static struct msm_gpu *a6xx_gpu_init(struct drm_device *dev)
 		gpu->num_perfcntr_groups = a8xx_num_perfcntr_groups;
 	}
 
-	mutex_init(&a6xx_gpu->gmu.lock);
 	spin_lock_init(&a6xx_gpu->aperture_lock);
 
 	adreno_gpu->registers = NULL;
 
-	/* Check if there is a GMU phandle and set it up */
 	struct device_node *node __free(device_node) =
 		of_parse_phandle(pdev->dev.of_node, "qcom,gmu", 0);
-	/* FIXME: How do we gracefully handle this? */
-	BUG_ON(!node);
+	if (WARN_ON(!node)) {
+		kfree(a6xx_gpu);
+		return ERR_PTR(-ENODEV);
+	}
 
 	adreno_gpu->gmu_is_wrapper = of_device_is_compatible(node, "qcom,adreno-gmu-wrapper");
 
@@ -2757,15 +2770,6 @@ static struct msm_gpu *a6xx_gpu_init(struct drm_device *dev)
 	if (adreno_is_a618(adreno_gpu) || adreno_is_7c3(adreno_gpu))
 		priv->gpu_clamp_to_idle = true;
 
-	if (adreno_has_gmu_wrapper(adreno_gpu) || adreno_has_rgmu(adreno_gpu))
-		ret = a6xx_gmu_wrapper_init(a6xx_gpu, node);
-	else
-		ret = a6xx_gmu_init(a6xx_gpu, node);
-	if (ret) {
-		a6xx_destroy(&(a6xx_gpu->base.base));
-		return ERR_PTR(ret);
-	}
-
 	adreno_gpu->uche_trap_base = 0x1fffffffff000ull;
 
 	msm_mmu_set_fault_handler(to_msm_vm(gpu->vm)->mmu, gpu,
@@ -2780,6 +2784,12 @@ static struct msm_gpu *a6xx_gpu_init(struct drm_device *dev)
 
 	/* Set up the preemption specific bits and pieces for each ringbuffer */
 	a6xx_preempt_init(gpu);
+
+	gmu_pdev = of_find_device_by_node(node);
+	if (gmu_pdev) {
+		platform_set_drvdata(gmu_pdev, a6xx_gpu);
+		put_device(&gmu_pdev->dev);
+	}
 
 	return gpu;
 }
