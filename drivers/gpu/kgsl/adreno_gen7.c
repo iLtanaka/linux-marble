@@ -1122,6 +1122,15 @@ int gen7_scm_gpu_init_cx_regs(struct adreno_device *adreno_dev)
 		adreno_dev->clx_enabled = true;
 
 	/*
+	 * On some gen7 targets TZ rejects this call with -EIO even though the
+	 * GPU boots fine without the protected register programming (BCL
+	 * stays disabled and is set up after the first GMU boot). Don't fail
+	 * GPU bring-up unless TZ-backed CLX or TSENSE was requested.
+	 */
+	if (ret == -EIO && !(gpu_req & (GPU_CLX_EN_REQ | GPU_TSENSE_EN_REQ)))
+		return 0;
+
+	/*
 	 * If scm call returned EOPNOTSUPP, either we are on a kernel version
 	 * lesser than 6.1 where scm call is not supported or we are sending an
 	 * empty request. Ignore the error in such cases.

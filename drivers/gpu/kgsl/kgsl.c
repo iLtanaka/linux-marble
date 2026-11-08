@@ -1563,7 +1563,8 @@ err:
 	if (result) {
 		filep->private_data = NULL;
 		kfree(dev_priv);
-		pm_runtime_put(&device->pdev->dev);
+		if (!kgsl_is_standard_binding(device->pdev->dev.of_node))
+			pm_runtime_put(&device->pdev->dev);
 	}
 	return result;
 }

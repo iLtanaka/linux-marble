@@ -2048,6 +2048,10 @@ int qcom_scm_gpu_init_regs(u32 gpu_req)
 		.owner = ARM_SMCCC_OWNER_SIP,
 	};
 
+	if (!__qcom_scm_is_call_available(__scm->dev, QCOM_SCM_SVC_GPU,
+					  QCOM_SCM_SVC_GPU_INIT_REGS))
+		return -EOPNOTSUPP;
+
 	return qcom_scm_call(__scm->dev, &desc, NULL);
 }
 EXPORT_SYMBOL_GPL(qcom_scm_gpu_init_regs);
