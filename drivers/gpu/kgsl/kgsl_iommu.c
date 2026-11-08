@@ -1375,6 +1375,11 @@ static void kgsl_iommu_set_ttbr0(struct kgsl_iommu_context *context,
 	else
 		adreno_smmu = dev_get_drvdata(&context->pdev->dev);
 
+	if (!adreno_smmu || !adreno_smmu->set_ttbr0_cfg) {
+		dev_err_ratelimited(device->dev, "adreno_smmu_priv is not initialized\n");
+		return;
+	}
+
 	/* Enable CX and clocks before we call into SMMU to setup registers */
 	kgsl_iommu_enable_clk(mmu);
 	adreno_smmu->set_ttbr0_cfg(adreno_smmu->cookie, pgtbl_cfg);
@@ -1513,6 +1518,9 @@ static int kgsl_iopgtbl_alloc(struct kgsl_iommu_context *ctx, struct kgsl_iommu_
 		adreno_smmu = kgsl_get_prvdata(ctx->kgsldev->dev);
 	else
 		adreno_smmu = dev_get_drvdata(&ctx->pdev->dev);
+
+	if (!adreno_smmu || !adreno_smmu->get_ttbr1_cfg)
+		return -ENODEV;
 
 	if (adreno_smmu->cookie)
 		cfg = adreno_smmu->get_ttbr1_cfg(adreno_smmu->cookie);

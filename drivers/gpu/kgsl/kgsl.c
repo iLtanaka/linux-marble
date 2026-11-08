@@ -5329,8 +5329,11 @@ int kgsl_device_platform_probe(struct kgsl_device *device)
 		return status;
 
 	/* Probe standard kgsl smmu dt bindings */
-	if (kgsl_is_standard_binding(pdev->dev.of_node))
-		kgsl_iommu_probe_standard(device, pdev);
+	if (kgsl_is_standard_binding(pdev->dev.of_node)) {
+		status = kgsl_iommu_probe_standard(device, pdev);
+		if (status)
+			goto error;
+	}
 
 	/* Can return -EPROBE_DEFER */
 	status = kgsl_pwrctrl_init(device);
