@@ -150,6 +150,8 @@ struct gunyah_rm {
 
 	unsigned char recv_msg[GUNYAH_RM_MSGQ_MSG_SIZE] __aligned(16);
 	unsigned char send_msg[GUNYAH_RM_MSGQ_MSG_SIZE] __aligned(16);
+	/* Output structure of the native msgqueue_receive hypercall. */
+	unsigned char recv_out[32] __aligned(16);
 	struct mutex send_lock;
 	struct completion send_ready;
 	struct blocking_notifier_head nh;
@@ -468,7 +470,8 @@ static irqreturn_t gunyah_rm_rx(int irq, void *data)
 		gunyah_error = gunyah_hypercall_msgq_recv(rm->rx_ghrsc.capid,
 							  msg,
 							  sizeof(rm->recv_msg),
-							  &len, &ready);
+							  &len, &ready,
+							  rm->recv_out);
 		if (gunyah_error != GUNYAH_ERROR_OK) {
 			if (gunyah_error != GUNYAH_ERROR_MSGQUEUE_EMPTY)
 				pr_warn("Failed to receive data: %d\n",
@@ -518,80 +521,6 @@ static irqreturn_t gunyah_rm_tx(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-/*
- * 0x6017 / 0x6018 msgqueue_bind_send_virq:
- *   x0=queue_cap, x1=virq_cap (TYPE 11 CAP!, not number!), x2=virq_number, x3=0
- *   x1=0 -> ARG_INVAL (1).
- *   virq_cap type 11 — no source available yet: VM_GET_HYP_RESOURCES (0x56000020)
- *   is not a HVC in the 0x6000..0x6060 table, hyp memory (0x80256000) is not
- *   accessible from guest.
- *   Temporary stub: calling with x1=0 gives ARG_INVAL — will see in dmesg.
- *   Real fix: get virq_cap from DT or reverse 0x56000020.
- */
-#define GUNYAH_RM_MSGQ_BIND(imm, capid, virq_cap, virq_num)			\
-({									\
-	register u64 _x0 asm("x0") = (capid);				\
-	register u64 _x1 asm("x1") = (virq_cap);				\
-	register u64 _x2 asm("x2") = (virq_num);				\
-	register u64 _x3 asm("x3") = 0;					\
-	register u64 _x4 asm("x4") = 0;					\
-	register u64 _x5 asm("x5") = 0;					\
-	register u64 _x6 asm("x6") = 0;					\
-	register u64 _x7 asm("x7") = 0;					\
-	asm volatile ("hvc #" #imm "\n"					\
-		: "+r"(_x0), "+r"(_x1), "+r"(_x2), "+r"(_x3),		\
-		  "+r"(_x4), "+r"(_x5), "+r"(_x6), "+r"(_x7)		\
-		: : "memory");						\
-	_x0;								\
-})
-
-static void gunyah_rm_configure_msgqs(struct gunyah_rm *rm)
-{
-	enum gunyah_error err;
-
-	/*
-	 * 0x600b partition_create_msgqueue: creates queue object (type 6).
-	 * Cap is not returned — caller must know cap in advance
-	 * (here from DT: tx_ghrsc.capid / rx_ghrsc.capid).
-	 * 0x600b sets max_msg_size=200, depth=8.
-	 */
-	err = gunyah_hypercall_msgqueue_create(rm->tx_ghrsc.capid,
-					       rm->rx_ghrsc.capid);
-	pr_info("gunyah_rm: msgq create tx=%#llx rx=%#llx ret=%d\n",
-		rm->tx_ghrsc.capid, rm->rx_ghrsc.capid, err);
-
-	/*
-	 * 0x601F / 0x6020 configure — mandatory before first send/recv.
-	 * 0x600b sets max_msg_size=200; configure overwrites it.
-	 * DT says qcom,rx/tx-message-size = <0xf0> (240) — keeping 240.
-	 */
-	err = gunyah_hypercall_msgq_configure_send(rm->tx_ghrsc.capid,
-						   GUNYAH_RM_MSGQ_MSG_SIZE, 0);
-	pr_info("gunyah_rm: msgq configure TX cap=%#llx ret=%d\n",
-		rm->tx_ghrsc.capid, err);
-
-	err = gunyah_hypercall_msgq_configure_receive(rm->rx_ghrsc.capid,
-						      GUNYAH_RM_MSGQ_MSG_SIZE, 0);
-	pr_info("gunyah_rm: msgq configure RX cap=%#llx ret=%d\n",
-		rm->rx_ghrsc.capid, err);
-
-	{
-		u64 ret;
-
-		/* x1 = virq_cap (type 11, from hypervisor during init),
-		 * x2 = virq_number (0x3a0 TX, 0x3a1 RX) */
-		ret = GUNYAH_RM_MSGQ_BIND(0x6017, rm->tx_ghrsc.capid,
-					  rm->tx_ghrsc.virq_cap, 0x3a0);
-		pr_info("gunyah_rm: msgq bind TX cap=%#llx virq_cap=%#llx ret=%#llx\n",
-			rm->tx_ghrsc.capid, rm->tx_ghrsc.virq_cap, ret);
-
-		ret = GUNYAH_RM_MSGQ_BIND(0x6018, rm->rx_ghrsc.capid,
-					  rm->rx_ghrsc.virq_cap, 0x3a1);
-		pr_info("gunyah_rm: msgq bind RX cap=%#llx virq_cap=%#llx ret=%#llx\n",
-			rm->rx_ghrsc.capid, rm->rx_ghrsc.virq_cap, ret);
-	}
-}
-
 static int gunyah_rm_msgq_send(struct gunyah_rm *rm, size_t size, bool push)
 {
 	const u64 tx_flags = push ? GUNYAH_HYPERCALL_MSGQ_TX_FLAGS_PUSH : 0;
@@ -601,7 +530,6 @@ static int gunyah_rm_msgq_send(struct gunyah_rm *rm, size_t size, bool push)
 
 	lockdep_assert_held(&rm->send_lock);
 
-again:
 	wait_for_completion(&rm->send_ready);
 
 	gunyah_error = gunyah_hypercall_msgq_send(rm->tx_ghrsc.capid, size,
@@ -610,14 +538,19 @@ again:
 	pr_info("gunyah_rm: msgq_send capid=0x%llx size=%zu tx_flags=%llu ret=%d ready=%d\n",
 		rm->tx_ghrsc.capid, size, tx_flags, (int)gunyah_error, ready);
 
-	/* Should never happen because Linux properly tracks the ready-state of the msgq */
-	if (WARN_ON(gunyah_error == GUNYAH_ERROR_MSGQUEUE_FULL))
-		goto again;
+	/*
+	 * A stuck queue must not block the caller forever. Complete the
+	 * readiness gate so the next attempt fails fast instead of sleeping.
+	 */
+	if (gunyah_error != GUNYAH_ERROR_OK) {
+		complete(&rm->send_ready);
+		return gunyah_error_remap(gunyah_error);
+	}
 
 	if (ready)
 		complete(&rm->send_ready);
 
-	return gunyah_error_remap(gunyah_error);
+	return 0;
 }
 
 static int gunyah_rm_send_request(struct gunyah_rm *rm, u32 message_id,
@@ -854,6 +787,150 @@ static int gunyah_rm_probe_info_area(struct gunyah_rm *rm)
 	return 0;
 }
 
+static void gunyah_rm_dump_hyp_children(void)
+{
+	struct device_node *hyp __free(device_node) = NULL;
+	struct device_node *child;
+
+	hyp = of_find_node_by_path("/hypervisor");
+	if (!hyp) {
+		pr_info("gunyah_rm: no /hypervisor node in the device tree\n");
+		return;
+	}
+
+	child = of_get_next_child(hyp, NULL);
+	while (child) {
+		const char *compat = NULL;
+		u64 reg0 = 0, reg1 = 0;
+		int ret0, ret1;
+
+		of_property_read_string(child, "compatible", &compat);
+		ret0 = of_property_read_u64_index(child, "reg", 0, &reg0);
+		ret1 = of_property_read_u64_index(child, "reg", 1, &reg1);
+
+		pr_info("gunyah_rm: /hypervisor child %pOF compatible=%s reg0=%#llx(%d) reg1=%#llx(%d)\n",
+			child, compat ?: "<none>", reg0, ret0, reg1, ret1);
+
+		/* of_get_next_child() drops the reference to @child itself. */
+		child = of_get_next_child(hyp, child);
+	}
+}
+
+static void gunyah_rm_msgq_drain(struct gunyah_rm *rm, u64 capid,
+				 const char *name)
+{
+	int i;
+
+	for (i = 0; i < 16; i++) {
+		enum gunyah_error err;
+		size_t len = 0;
+		bool ready = false;
+
+		memset(rm->recv_msg, 0, sizeof(rm->recv_msg));
+		err = gunyah_hypercall_msgq_recv(capid, rm->recv_msg,
+						 sizeof(rm->recv_msg), &len,
+						 &ready, rm->recv_out);
+		if (err != GUNYAH_ERROR_OK) {
+			pr_info("gunyah_rm: drain %s cap=%#llx empty after %d msg(s), ret=%d\n",
+				name, capid, i, (int)err);
+			return;
+		}
+
+		pr_info("gunyah_rm: drain %s cap=%#llx msg %d len=%zu data=%*phN\n",
+			name, capid, i, len, (int)min(len, (size_t)16),
+			rm->recv_msg);
+	}
+
+	pr_info("gunyah_rm: drain %s cap=%#llx still not empty after 16 msgs\n",
+		name, capid);
+}
+
+/*
+ * One-shot transport diagnostic: clear both queues, try to configure both caps
+ * in both directions and dump anything still queued. This reveals a swapped
+ * TX/RX cap order and a queue that is stuck across reboots.
+ */
+static void gunyah_rm_msgq_diag(struct gunyah_rm *rm)
+{
+	enum gunyah_error cfg_send_tx, cfg_recv_rx;
+	enum gunyah_error cfg_send_rx, cfg_recv_tx;
+	u64 tx = rm->tx_ghrsc.capid;
+	u64 rx = rm->rx_ghrsc.capid;
+	unsigned int tx_irq = rm->tx_ghrsc.irq;
+	unsigned int rx_irq = rm->rx_ghrsc.irq;
+	u64 tmp;
+
+	pr_info("gunyah_rm: msgq diag ABI=%d (%s)\n", gunyah_msgq_abi,
+		gunyah_msgq_abi ? "published doc" : "reverse-engineered");
+
+	pr_info("gunyah_rm: flush tx=%#llx ret=%d\n", tx,
+		(int)gunyah_hypercall_msgq_flush(tx));
+	pr_info("gunyah_rm: flush rx=%#llx ret=%d\n", rx,
+		(int)gunyah_hypercall_msgq_flush(rx));
+
+	cfg_send_tx = gunyah_hypercall_msgq_configure_send(tx,
+							   GUNYAH_RM_MSGQ_MSG_SIZE,
+							   0);
+	cfg_recv_rx = gunyah_hypercall_msgq_configure_receive(rx,
+							      GUNYAH_RM_MSGQ_MSG_SIZE,
+							      0);
+	pr_info("gunyah_rm: configure_send tx=%#llx ret=%d, configure_receive rx=%#llx ret=%d\n",
+		tx, (int)cfg_send_tx, rx, (int)cfg_recv_rx);
+
+	/* Cross-configure in case the device tree order is swapped. */
+	cfg_send_rx = gunyah_hypercall_msgq_configure_send(rx,
+							   GUNYAH_RM_MSGQ_MSG_SIZE,
+							   0);
+	cfg_recv_tx = gunyah_hypercall_msgq_configure_receive(tx,
+							      GUNYAH_RM_MSGQ_MSG_SIZE,
+							      0);
+	pr_info("gunyah_rm: cross configure_send rx=%#llx ret=%d, configure_receive tx=%#llx ret=%d\n",
+		rx, (int)cfg_send_rx, tx, (int)cfg_recv_tx);
+
+	/*
+	 * The queue object types are distinct, so a configure call only
+	 * succeeds on the cap that really has that direction. If the primary
+	 * assignment failed but the cross assignment worked, the device tree
+	 * lists the caps in the opposite order.
+	 */
+	if (cfg_send_tx != GUNYAH_ERROR_OK &&
+	    cfg_recv_rx != GUNYAH_ERROR_OK &&
+	    cfg_send_rx == GUNYAH_ERROR_OK &&
+	    cfg_recv_tx == GUNYAH_ERROR_OK) {
+		pr_warn("gunyah_rm: TX/RX caps look swapped, swapping %#llx <-> %#llx\n",
+			tx, rx);
+
+		tmp = tx;
+		tx = rx;
+		rx = tmp;
+		tmp = tx_irq;
+		tx_irq = rx_irq;
+		rx_irq = tmp;
+
+		rm->tx_ghrsc.capid = tx;
+		rm->rx_ghrsc.capid = rx;
+		rm->tx_ghrsc.irq = tx_irq;
+		rm->rx_ghrsc.irq = rx_irq;
+	}
+
+	gunyah_rm_msgq_drain(rm, tx, "tx");
+	gunyah_rm_msgq_drain(rm, rx, "rx");
+}
+
+/*
+ * The capability IDs are opaque 64-bit values and the hypervisor may hand out
+ * different ones on every boot. The static device-tree node is only a
+ * fallback; these parameters allow testing freshly dumped IDs without
+ * rebuilding the DTB.
+ */
+static unsigned long long gunyah_rm_tx_cap_override;
+module_param_named(tx_cap, gunyah_rm_tx_cap_override, ullong, 0444);
+MODULE_PARM_DESC(tx_cap, "Override the RM TX message-queue capability ID");
+
+static unsigned long long gunyah_rm_rx_cap_override;
+module_param_named(rx_cap, gunyah_rm_rx_cap_override, ullong, 0444);
+MODULE_PARM_DESC(rx_cap, "Override the RM RX message-queue capability ID");
+
 static int gunyah_rm_get_of_info(struct gunyah_rm *rm)
 {
 	struct device_node *gunyah_np __free(device_node) = NULL;
@@ -862,6 +939,8 @@ static int gunyah_rm_get_of_info(struct gunyah_rm *rm)
 
 	if (!arch_is_gunyah_guest())
 		return -ENODEV;
+
+	gunyah_rm_dump_hyp_children();
 
 	gunyah_np = of_find_node_by_path("/hypervisor");
 	if (!gunyah_np)
@@ -891,9 +970,16 @@ static int gunyah_rm_get_of_info(struct gunyah_rm *rm)
 		return -EINVAL;
 	rm->rx_ghrsc.irq = ret;
 
-	pr_info("gunyah_rm: using DT node %pOF under %pOF: tx=%#llx rx=%#llx irq=%d/%d\n",
+	if (gunyah_rm_tx_cap_override)
+		rm->tx_ghrsc.capid = gunyah_rm_tx_cap_override;
+	if (gunyah_rm_rx_cap_override)
+		rm->rx_ghrsc.capid = gunyah_rm_rx_cap_override;
+
+	pr_info("gunyah_rm: using DT node %pOF under %pOF: tx=%#llx rx=%#llx irq=%d/%d%s\n",
 		rm_np, gunyah_np, rm->tx_ghrsc.capid, rm->rx_ghrsc.capid,
-		rm->tx_ghrsc.irq, rm->rx_ghrsc.irq);
+		rm->tx_ghrsc.irq, rm->rx_ghrsc.irq,
+		(gunyah_rm_tx_cap_override || gunyah_rm_rx_cap_override) ?
+			" (module parameter override)" : "");
 
 	return 0;
 }
@@ -1025,6 +1111,8 @@ static int __init gunyah_rm_init(void)
 	if (ret)
 		return ret;
 
+	gunyah_rm_msgq_diag(rm);
+
 	enable_irq_wake(rm->tx_ghrsc.irq);
 	ret = request_threaded_irq(rm->tx_ghrsc.irq, NULL,
 					 gunyah_rm_tx, IRQF_ONESHOT,
@@ -1040,8 +1128,6 @@ static int __init gunyah_rm_init(void)
 					 "gunyah_rm_rx", rm);
 	if (ret)
 		goto free_tx_irq;
-
-	gunyah_rm_configure_msgqs(rm);
 
 	rm->miscdev.name = "gunyah";
 	rm->miscdev.minor = MISC_DYNAMIC_MINOR;

@@ -165,7 +165,6 @@ enum gunyah_resource_type {
 struct gunyah_resource {
 	enum gunyah_resource_type type;
 	u64 capid;
-	u64 virq_cap;	/* type 11 virq capability, set by hypervisor during init */
 	unsigned int irq;
 
 	struct list_head list;
@@ -463,14 +462,18 @@ enum gunyah_error gunyah_hypercall_bell_set_mask(u64 capid, u64 enable_mask,
 /* Immediately raise RX vIRQ on receiver VM */
 #define GUNYAH_HYPERCALL_MSGQ_TX_FLAGS_PUSH BIT(0)
 
+/* Selects between the reverse-engineered and the published msgq ABI. */
+extern int gunyah_msgq_abi;
+
 enum gunyah_error gunyah_hypercall_msgq_send(u64 capid, size_t size, void *buff,
 					     u64 tx_flags, bool *ready);
 enum gunyah_error gunyah_hypercall_msgq_recv(u64 capid, void *buff, size_t size,
-					     size_t *recv_size, bool *ready);
+					     size_t *recv_size, bool *ready,
+					     void *out);
+enum gunyah_error gunyah_hypercall_msgq_flush(u64 capid);
 enum gunyah_error gunyah_hypercall_msgq_configure_send(u64 capid,
 						       u64 max_msg_size,
 						       u64 flags);
-enum gunyah_error gunyah_hypercall_msgqueue_create(u64 cap1, u64 cap2);
 enum gunyah_error gunyah_hypercall_msgq_configure_receive(u64 capid,
 							  u64 max_msg_size,
 							  u64 flags);
